@@ -58,6 +58,8 @@ class BaseRunner:
         self.client_epochs_done, self.server_epochs_done = 0, 0
         self.attack, self.defence = None, None
         self.defence_time = None
+        self.probe_metadata = None
+        self.probe_auditor = None
 
         # Configure working device (gpu/cpu, cudnn.benchmark)
         self.configure_comp_device()
@@ -230,6 +232,8 @@ class BaseRunner:
                 trainData[actor] = initialized_pub_ds
 
 
+        trainData = self.maybe_wrap_public_datasets_with_probes(trainData)
+
         # Define the public loaders
         for mode, data in zip(['train', 'train_server', 'val', 'test'],
                               [trainData['client'], trainData['server'], valData_public, testData]):
@@ -256,6 +260,54 @@ class BaseRunner:
             client_data_split = trainData_private_split[client_id - 1]
             client.assign_dataset(trainData=client_data_split)
             sys.stdout.write(f"Client {client_id} has {len(client_data_split)} samples.\n")
+
+    def maybe_wrap_public_datasets_with_probes(self, trainData: dict):
+        """Optionally replace a small subset of public samples with probe samples."""
+        if not getattr(self.config, 'use_probe', False):
+            return trainData
+
+        from probes.probe_auditor import ProbeAuditor
+        from probes.probe_dataset import ProbeDatasetWrapper
+
+        client_dataset = ProbeDatasetWrapper(
+            base_dataset=trainData['client'],
+            probe_base_count=self.config.probe_base_count,
+            probe_scales=self.config.probe_scales,
+            probe_type=self.config.probe_type,
+            probe_seed=self.config.probe_seed,
+            mode=self.config.probe_mode,
+            clip_min=getattr(self.config, 'probe_clip_min', None),
+            clip_max=getattr(self.config, 'probe_clip_max', None),
+        )
+        server_dataset = ProbeDatasetWrapper(
+            base_dataset=trainData['server'],
+            probe_base_count=self.config.probe_base_count,
+            probe_scales=self.config.probe_scales,
+            probe_type=self.config.probe_type,
+            probe_seed=self.config.probe_seed,
+            mode=self.config.probe_mode,
+            metadata=client_dataset.metadata,
+            clip_min=getattr(self.config, 'probe_clip_min', None),
+            clip_max=getattr(self.config, 'probe_clip_max', None),
+        )
+
+        trainData['client'] = client_dataset
+        trainData['server'] = server_dataset
+        self.probe_metadata = client_dataset.metadata
+        self.probe_auditor = ProbeAuditor(
+            probe_metadata=self.probe_metadata,
+            n_classes=self.n_classes,
+            start_round=getattr(self.config, 'probe_start_round', 1),
+            w_entropy=getattr(self.config, 'probe_w_entropy', 1.0),
+            w_confidence=getattr(self.config, 'probe_w_confidence', 1.0),
+            w_spc=getattr(self.config, 'probe_w_spc', 1.0),
+            log_each_round=getattr(self.config, 'probe_log_each_round', True),
+        )
+        sys.stdout.write(
+            f"Using probe audit: {len(self.probe_metadata['probe_indices'])} probe samples "
+            f"from {len(self.probe_metadata['probe_groups'])} probe groups.\n"
+        )
+        return trainData
 
     def define_strategy(self):
         """Defines the training strategy.

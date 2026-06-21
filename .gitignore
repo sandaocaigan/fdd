@@ -1,4 +1,3 @@
-
 # datasets
 datasets_pytorch/
 data/
@@ -9,6 +8,7 @@ data/
 *.pt
 *.pth
 *.ckpt
+!byzantine/cpa_info/*.pt
 
 # logs / experiment outputs
 wandb/

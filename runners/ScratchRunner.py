@@ -1,4 +1,4 @@
-﻿# ===========================================================================
+# ===========================================================================
 # Project:      On the Byzantine-Resilience of Distillation-Based Federated Learning - IOL Lab @ ZIB
 # Paper:        arxiv.org/abs/2402.12265
 # File:         runners/ScratchRunner.py
@@ -23,7 +23,7 @@ from utilities import Utilities as Utils
 class ScratchRunner(BaseRunner):
     """Handles the federated training by concurrently training clients and the server. We do not fetch pretrained models anymore."""
 
-    # 中文注释：初始化 ScratchRunner，先调用 BaseRunner 完成基础配置，再准备当前轮次、wandb artifact 等运行状态。
+    # 初始化 ScratchRunner，先调用 BaseRunner 完成基础配置，再准备当前轮次、wandb artifact 等运行状态。
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.current_round = None
@@ -32,7 +32,7 @@ class ScratchRunner(BaseRunner):
         entity, project = wandb.run.entity, wandb.run.project
         self.initial_artifact_name = f"seed_placeholder-{entity}-{project}-{self.config.arch}-{self.config.dataset}-{self.config.run_id}"
 
-    # 中文注释：从 wandb artifact 中查找同一实验的随机种子，保证多次运行可以复用一致的初始化随机性。
+    # 从 wandb artifact 中查找同一实验的随机种子，保证多次运行可以复用一致的初始化随机性。
     def find_existing_seed(self):
         """Finds an existing wandb artifact and pulls the seed. We do not pull the initial model,
                 to ensure that each client has a differently initialized model."""
@@ -47,7 +47,7 @@ class ScratchRunner(BaseRunner):
         outputStr = f"Found {self.initial_artifact_name} with seed {seed}" if self.artifact is not None else "Nothing found."
         sys.stdout.write(f"Trying to find reference artifact in project: {outputStr}\n")
 
-    # 中文注释：如果还没有保存随机种子，就把当前 seed 写入 wandb artifact，方便其他实验复现。
+    # 如果还没有保存随机种子，就把当前 seed 写入 wandb artifact，方便其他实验复现。
     def save_artifact_seed(self):
         """Save artifact and seed before training so other runs can fetch it.
             If self.artifact is not None, this is not necessary since the artifact already exists.
@@ -59,7 +59,7 @@ class ScratchRunner(BaseRunner):
             wandb.run.use_artifact(self.artifact)
 
     @torch.no_grad()
-    # 中文注释：把服务器当前模型参数下发给所有客户端，作为本轮本地训练的起点。
+    # 把服务器当前模型参数下发给所有客户端，作为本轮本地训练的起点。
     def broadcast_server_model_to_clients(self):
         """Broadcast server model params to all clients."""
         sys.stdout.write("Broadcasting server model to clients.\n")
@@ -71,7 +71,7 @@ class ScratchRunner(BaseRunner):
         self.total_bytes_communicated += communication_cost * len(self.clients)
 
     @torch.no_grad()
-    # 中文注释：FedAVG 路径使用的函数，收集客户端模型参数、应用攻击与防御聚合，再更新服务器模型。
+    # FedAVG 路径使用的函数，收集客户端模型参数、应用攻击与防御聚合，再更新服务器模型。
     def broadcast_agg_client_models_to_server(self):
         """Broadcast agg. client models to the server."""
         sys.stdout.write(f"{self.config.attack}: Broadcasting clients models and applying attack.\n")
@@ -86,7 +86,7 @@ class ScratchRunner(BaseRunner):
         communication_cost = Utils.get_model_communication_cost(self.server.model)
         self.total_bytes_communicated += communication_cost * len(self.clients)
 
-    # 中文注释：根据配置选择拜占庭攻击和防御方法，并随机标记指定数量的恶意客户端。
+    # 根据配置选择拜占庭攻击和防御方法，并随机标记指定数量的恶意客户端。
     def set_attack_defence(self):
         """Set attack and defence"""
         if self.config.attack not in [None, 'None', 'none',
@@ -97,7 +97,7 @@ class ScratchRunner(BaseRunner):
 
             # Randomly pick n_byzantine_clients clients
             byzantine_client_indices = torch.randperm(len(self.clients))[:n_byzantine_clients]
-            byzantine_ids_str = ', '.join(str(x) for x in byzantine_client_indices.tolist())
+            byzantine_ids_str = ', '.join(str(self.clients[int(x)].client_id) for x in byzantine_client_indices.tolist())
             sys.stdout.write(f"Client(s): {byzantine_ids_str} are byzantine.\n")
             for idx in byzantine_client_indices:
                 self.clients[idx].is_byzantine = True
@@ -136,13 +136,13 @@ class ScratchRunner(BaseRunner):
             sys.stdout.write(f"No defence.\n")
             self.defence = defences.NoDefence(clients=self.clients, config=self.config, runner_instance=self)
 
-    # 中文注释：为每个客户端初始化一个模型实例。
+    # 为每个客户端初始化一个模型实例。
     def set_client_models(self):
         """For each client: Initialize the models"""
         for client in self.clients:
             client.set_model(reinit=True, fileName=None)
 
-    # 中文注释：为所有客户端创建或更新优化器和学习率调度器。
+    # 为所有客户端创建或更新优化器和学习率调度器。
     def set_client_optimizers(self, reinit_optimizer: bool = True, lr_duration: Optional[int] = None):
         """Sets the optimizers/schedulers of clients.
         Args:
@@ -158,7 +158,7 @@ class ScratchRunner(BaseRunner):
             client.set_optimizer_and_scheduler(n_epochs=n_epochs, n_batches_per_epoch=n_batches_per_epoch,
                                                reinit_optimizer=reinit_optimizer)
 
-    # 中文注释：为服务器模型创建或更新优化器和学习率调度器。
+    # 为服务器模型创建或更新优化器和学习率调度器。
     def set_server_optimizer(self, reinit_server: bool, first_init: bool):
         """Sets the optimizers/schedulers of the server.
         Args:
@@ -176,7 +176,7 @@ class ScratchRunner(BaseRunner):
                                                 reinit_optimizer=(reinit_server or first_init))
 
     @torch.no_grad()
-    # 中文注释：根据给定 dataloader 的真实标签和外部传入的预测张量，计算 ensemble 或聚合预测的准确率。
+    # 根据给定 dataloader 的真实标签和外部传入的预测张量，计算 ensemble 或聚合预测的准确率。
     def compute_accuracy(self, loader, prediction):
         """
         Compute accuracy on loader where prediction is a tensor containing all predictions of ensemble
@@ -197,7 +197,7 @@ class ScratchRunner(BaseRunner):
         return accuracy_meter.compute()
 
     @torch.no_grad()
-    # 中文注释：让所有客户端在公共数据集上前向推理，收集每个公共样本的逐样本 softmax 概率预测。
+    # 让所有客户端在公共数据集上前向推理，收集每个公共样本的逐样本 softmax 概率预测。
     def get_client_predictions(self, mode: str):
         """For each client: Predict the entire public train/test set and output for each sample the predicted probs.
              For this to work, the indices of the subset must have been reset to start from zero.
@@ -224,7 +224,7 @@ class ScratchRunner(BaseRunner):
 
         return prediction_store_tensors
 
-    # 中文注释：用聚合后的公共数据软预测作为监督信号，对服务器或客户端模型进行蒸馏训练/评估。
+    # 用聚合后的公共数据软预测作为监督信号，对服务器或客户端模型进行蒸馏训练/评估。
     def distill(self, actor: Actor, avg_output: torch.tensor, is_training: bool = True):
         """Train the actor (server, client) using averaged probabilities from all clients. If not is_training,
         the actor is only evaluated on the public train set.
@@ -260,23 +260,23 @@ class ScratchRunner(BaseRunner):
                         # We specify y_target as None, since it is not available
                         actor.update_batch_metrics(mode='train', loss=loss, output=output, y_target=None)
 
-    # 中文注释：让诚实客户端在自己的私有训练数据上进行本地监督训练，并跳过被标记的恶意客户端。
+    # 让诚实客户端在自己的私有训练数据上进行本地监督训练，并跳过被标记的恶意客户端。
     def train_client_local(self, n_epochs: int, current_round: int):
         """Train each client locally on its private dataset for n_epochs."""
-        for epoch in range(1, n_epochs + 1, 1):
+        for epoch in range(1, n_epochs + 1, 1): # 表示这一轮每个客户端要训练几个本地 epoch。
             for client in self.clients:
-                client.reset_averaged_metrics()  # Reset metrics of clients
-                if client.is_byzantine:
+                client.reset_averaged_metrics()  # Reset metrics of clients 清空当前客户端上一轮/上一次累计的指标。
+                if client.is_byzantine and self.attack.is_attack_active(): # 判断当前客户端是不是恶意客户端，并且攻击是否已经开始。
                     sys.stdout.write(
-                        f"\nRound {current_round}/{self.config.n_communications} - Local Epoch {epoch}/{n_epochs}: Skipping byzantine client-{client.client_id}.")
+                        f"\nRound {current_round}/{self.config.n_communications} - Local Epoch {epoch}/{n_epochs}: Skipping active byzantine client-{client.client_id}.")
                     continue
                 sys.stdout.write(
                     f"\nRound {current_round}/{self.config.n_communications} - Local Epoch {epoch}/{n_epochs}: Locally training client-{client.client_id}.")
-                self.train_epoch(actor=client, data='train', epoch=epoch)  # Train on private dataset
+                self.train_epoch(actor=client, data='train', epoch=epoch)  # Train on private dataset 真正训练客户端。
                 # Evaluate
                 if self.config.client_early_stopping:
                     self.evaluate_model(actor=client, data='val')
-                if epoch == n_epochs:
+                if epoch == n_epochs: # 如果当前是本轮最后一个本地 epoch，就在公共测试集上评估客户端。
                     self.evaluate_model(actor=client, data='test')
 
                 if self.config.client_early_stopping:
@@ -287,10 +287,20 @@ class ScratchRunner(BaseRunner):
                                           commit=True)  # Log clients at the end of each epoch
         self.client_epochs_done += n_epochs
 
-    # 中文注释：FedDistill 的核心步骤，收集客户端公共数据预测、执行预测层防御聚合，并用聚合预测蒸馏服务器模型。
+    def maybe_audit_probe_predictions(self, client_prediction_list):
+        """Run probe auditing after attack perturbation and before aggregation."""
+        if self.probe_auditor is None:
+            return None
+        return self.probe_auditor.audit(
+            client_prediction_list=client_prediction_list,
+            clients=self.clients,
+            current_round=self.current_round,
+        )
+    # FedDistill 的核心步骤，收集客户端公共数据预测、执行预测层防御聚合，并用聚合预测蒸馏服务器模型。
     def collect_avg_output_and_distill_to_server(self):
         sys.stdout.write(f"{self.config.attack}: Broadcasting clients predictions and applying attack.\n")
         client_prediction_list = self.attack.get_perturbed_client_predictions()  # Attack perturbs the client predictions
+        self.maybe_audit_probe_predictions(client_prediction_list)
 
         sys.stdout.write(f"{self.config.defence}: Averaging predictions with defence mechanism.\n")
         defence_start = time.time()
@@ -328,7 +338,7 @@ class ScratchRunner(BaseRunner):
         if self.config.server_early_stopping:
             self.server.load_checkpoint()
 
-    # 中文注释：联邦训练主循环，控制每轮广播、客户端本地训练、上行聚合/蒸馏、评估和日志记录。
+    # 联邦训练主循环，控制每轮广播、客户端本地训练、上行聚合/蒸馏、评估和日志记录。
     def train_federated(self):
         """Train the server and clients in a federated way."""
         for current_round in range(0, self.config.n_communications + 1, 1):
@@ -345,11 +355,11 @@ class ScratchRunner(BaseRunner):
             
 
             if is_training:
-                # Before local training, the server potentially sends aggregated info to clients
-                self.strategy.before_local_training()
+                # Before local training, the server potentially sends aggregated info to clients 服务器把当前模型下发给所有客户端。
+                self.strategy.before_local_training() 
 
-                # Determine the number of epochs for this round
-                round_n_epochs = self.strategy.get_phase_length(current_round=current_round)
+                # Determine the number of epochs for this round 计算这一轮客户端要训练几个本地 epoch。
+                round_n_epochs = self.strategy.get_phase_length(current_round=current_round) 
 
                 if self.config.restart_client_lr:
                     self.set_client_optimizers(reinit_optimizer=False, lr_duration=round_n_epochs)
@@ -370,7 +380,7 @@ class ScratchRunner(BaseRunner):
                         self.server.warmup_scheduler(warmup_steps=warmup_steps_server)
 
                 self.train_client_local(n_epochs=round_n_epochs,
-                                        current_round=current_round)  # Clients train locally, then evaluate them
+                                        current_round=current_round)  # Clients train locally, then evaluate them 本地 epoch 数和当前通信轮数
                 if self.config.client_early_stopping:
                     for client in self.clients:
                         client.load_checkpoint()
@@ -387,25 +397,25 @@ class ScratchRunner(BaseRunner):
             self.log_at_round_end(round=current_round, round_n_epochs=round_n_epochs,
                                   round_runtime=time.time() - t_start)
 
-    # 中文注释：完整实验入口，依次完成种子、模型、数据、优化器、攻防设置，并启动联邦训练。
+    # 完整实验入口，依次完成种子、模型、数据、优化器、攻防设置，并启动联邦训练。
     def run(self):
         """Function controlling the workflow."""
         # self.find_existing_seed()  # Check if artifact with same run_id exists, if so use the seed
 
         # We initialize the models before actually setting the seed!
-        self.set_client_models()  # Each client inits its own model
-        self.server.set_model(reinit=True)  # Server inits its own model
-        self.set_seed()  # Set the seed
+        self.set_client_models()  # Each client inits its own model 给每个客户端创建一个模型。
+        self.server.set_model(reinit=True)  # Server inits its own model 给服务器创建模型。
+        self.set_seed()  # Set the seed 设置随机种子
         # self.save_artifact_seed()  # Save the artifact for others to fetch from Wandb, if needed.
 
         # We initialize the dataloaders after setting the seed!
-        self.assign_dataloaders()  # Assign dataloaders
+        self.assign_dataloaders()  # Assign dataloaders 加载数据集
 
-        self.set_client_optimizers()
-        self.set_server_optimizer(reinit_server=self.config.reinit_server, first_init=True)
+        self.set_client_optimizers() # 给每个客户端创建优化器和学习率调度器
+        self.set_server_optimizer(reinit_server=self.config.reinit_server, first_init=True)  # 给服务器模型创建优化器和学习率调度器。
 
-        self.set_attack_defence()  # Set attack and defence
+        self.set_attack_defence()  # Set attack and defence 根据配置创建攻击和防御对象，并随机标记恶意客户端。
 
-        self.train_federated()
-        self.final_log()  # Log all clients and server
+        self.train_federated() # 正式进入联邦训练主循环。每轮客户端训练、上传预测、攻击、防御、服务器蒸馏、探针审计都在这里触发。
+        self.final_log()  # Log all clients and server 训练结束后，重新评估所有客户端和服务器，并把最终指标写入 W&B。
 

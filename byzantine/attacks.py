@@ -21,6 +21,16 @@ class NoAttack:
         self.clients = kwargs['clients']
         self.runner = kwargs['runner_instance']
 
+    def is_attack_active(self):
+        """Return True after attack_start_round; used for delayed attacks."""
+        start_round = getattr(self.config, 'attack_start_round', 1)
+        if start_round in [None, 'None', 'none']:
+            return True
+        current_round = getattr(self.runner, 'current_round', None)
+        if current_round is None:
+            return True
+        return int(current_round) >= int(start_round)
+
     def get_perturbed_client_models(self, **kwargs):
         """Called before the model is communicated. Defaults to returning the individual client models (unchanged)."""
         return Utils.get_client_models(self.clients)
@@ -42,6 +52,8 @@ class ParameterRandomVector(NoAttack):
         return client_state_dict
 
     def get_perturbed_client_models(self, **kwargs):
+        if not self.is_attack_active():
+            return Utils.get_client_models(self.clients)
         client_model_list = []
         for client in self.clients:
             client_state_dict = client.model.state_dict()
@@ -77,6 +89,8 @@ class PredictionNaiveSignFlip(NoAttack):
 
     def get_perturbed_client_predictions(self, **kwargs):
         client_prediction_list = self.runner.get_client_predictions(mode='train')
+        if not self.is_attack_active():
+            return client_prediction_list
         for client_idx, client_predictions in enumerate(client_prediction_list):
             if self.clients[client_idx].is_byzantine:
                 random_logits = torch.randn_like(client_predictions)
@@ -95,6 +109,8 @@ class PredictionFixedSignFlip(NoAttack):
 
     def get_perturbed_client_predictions(self, **kwargs):
         client_prediction_list = self.runner.get_client_predictions(mode='train')
+        if not self.is_attack_active():
+            return client_prediction_list
         fixed_prediction = torch.zeros_like(client_prediction_list[0])
         byz_prediction  = fixed_prediction
         byz_prediction[:,0] = 1.
@@ -118,6 +134,8 @@ class PredictionAdversarialSignFlip(PredictionNaiveSignFlip):
 
     def get_perturbed_client_predictions(self, **kwargs):
         client_prediction_list = self.runner.get_client_predictions(mode='train')
+        if not self.is_attack_active():
+            return client_prediction_list
         # Get the list of predictions, but only the benign ones
         honest_client_predictions = [client_pred for client_idx, client_pred in enumerate(client_prediction_list)
                                      if not self.clients[client_idx].is_byzantine]
@@ -147,6 +165,8 @@ class CPA(PredictionNaiveSignFlip):
 
     def get_perturbed_client_predictions(self, **kwargs):
         client_prediction_list = self.runner.get_client_predictions(mode='train')
+        if not self.is_attack_active():
+            return client_prediction_list
         honest_client_predictions = [client_pred for client_idx, client_pred in enumerate(client_prediction_list)
                                      if not self.clients[client_idx].is_byzantine]
         honest_client_predictions = torch.stack(honest_client_predictions, dim=0)
@@ -183,6 +203,8 @@ class CELMAX(PredictionNaiveSignFlip):
     @torch.no_grad()
     def get_perturbed_client_predictions(self, **kwargs):
         client_prediction_list = self.runner.get_client_predictions(mode='train')
+        if not self.is_attack_active():
+            return client_prediction_list
         honest_client_predictions = [client_pred for client_idx, client_pred in enumerate(client_prediction_list)
                                      if not self.clients[client_idx].is_byzantine]
         honest_client_predictions = torch.stack(honest_client_predictions, dim=0)
