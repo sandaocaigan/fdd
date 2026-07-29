@@ -21,22 +21,21 @@ from utilities import Utilities as Utils
 
 
 class ScratchRunner(BaseRunner):
-    """Handles the federated training by concurrently training clients and the server. We do not fetch pretrained models anymore."""
+    """Handles federated training from random initialization."""
 
-    # 初始化 ScratchRunner，先调用 BaseRunner 完成基础配置，再准备当前轮次、wandb artifact 等运行状态。
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.current_round = None
         self.artifact = None
 
         entity, project = wandb.run.entity, wandb.run.project
-        self.initial_artifact_name = f"seed_placeholder-{entity}-{project}-{self.config.arch}-{self.config.dataset}-{self.config.run_id}"
+        self.initial_artifact_name = (
+            f"seed_placeholder-{entity}-{project}-{self.config.arch}-"
+            f"{self.config.dataset}-{self.config.run_id}"
+        )
 
-    # 从 wandb artifact 中查找同一实验的随机种子，保证多次运行可以复用一致的初始化随机性。
     def find_existing_seed(self):
-        """Finds an existing wandb artifact and pulls the seed. We do not pull the initial model,
-                to ensure that each client has a differently initialized model."""
-        # Create a new artifact, this is idempotent, i.e. no artifact is created if this already exists
+        """Find an existing wandb artifact and pull the seed."""
         try:
             self.artifact = wandb.run.use_artifact(f"{self.initial_artifact_name}:latest")
             seed = self.artifact.metadata["seed"]
@@ -44,22 +43,25 @@ class ScratchRunner(BaseRunner):
         except Exception as e:
             print(e)
 
-        outputStr = f"Found {self.initial_artifact_name} with seed {seed}" if self.artifact is not None else "Nothing found."
-        sys.stdout.write(f"Trying to find reference artifact in project: {outputStr}\n")
+        output_str = (
+            f"Found {self.initial_artifact_name} with seed {seed}"
+            if self.artifact is not None
+            else "Nothing found."
+        )
+        sys.stdout.write(f"Trying to find reference artifact in project: {output_str}\n")
 
-    # 如果还没有保存随机种子，就把当前 seed 写入 wandb artifact，方便其他实验复现。
     def save_artifact_seed(self):
-        """Save artifact and seed before training so other runs can fetch it.
-            If self.artifact is not None, this is not necessary since the artifact already exists.
-        """
+        """Save artifact and seed before training so other runs can fetch it."""
         if self.artifact is None:
-            self.artifact = wandb.Artifact(self.initial_artifact_name, type='seed_placeholder',
-                                           metadata={'seed': self.seed})
+            self.artifact = wandb.Artifact(
+                self.initial_artifact_name,
+                type="seed_placeholder",
+                metadata={"seed": self.seed},
+            )
             sys.stdout.write(f"Creating {self.initial_artifact_name}.\n")
             wandb.run.use_artifact(self.artifact)
 
     @torch.no_grad()
-    # 把服务器当前模型参数下发给所有客户端，作为本轮本地训练的起点。
     def broadcast_server_model_to_clients(self):
         """Broadcast server model params to all clients."""
         sys.stdout.write("Broadcasting server model to clients.\n")
@@ -71,295 +73,481 @@ class ScratchRunner(BaseRunner):
         self.total_bytes_communicated += communication_cost * len(self.clients)
 
     @torch.no_grad()
-    # FedAVG 路径使用的函数，收集客户端模型参数、应用攻击与防御聚合，再更新服务器模型。
     def broadcast_agg_client_models_to_server(self):
-        """Broadcast agg. client models to the server."""
+        """FedAVG path: aggregate client models and update the server."""
         sys.stdout.write(f"{self.config.attack}: Broadcasting clients models and applying attack.\n")
-        client_model_list = self.attack.get_perturbed_client_models()  # Attack perturbs the model
+        client_model_list = self.attack.get_perturbed_client_models()
 
         sys.stdout.write(f"{self.config.defence}: Averaging models with defence mechanism.\n")
         averaged_model = self.defence.get_aggregated_model(client_model_list)
-
         self.server.model.load_state_dict(averaged_model)
 
-        # We use the server model here since it is roughly the same size as every client model
         communication_cost = Utils.get_model_communication_cost(self.server.model)
         self.total_bytes_communicated += communication_cost * len(self.clients)
 
-    # 根据配置选择拜占庭攻击和防御方法，并随机标记指定数量的恶意客户端。
     def set_attack_defence(self):
-        """Set attack and defence"""
-        if self.config.attack not in [None, 'None', 'none',
-                                      'NoAttack']:  # For NoAttack, we do not set byzantine clients
+        """Set attack and defence objects, and mark Byzantine clients."""
+        if self.config.attack not in [None, "None", "none", "NoAttack"]:
             n_byzantine_clients = self.config.n_byzantine_clients or 0
-            assert 0 <= n_byzantine_clients <= self.config.n_clients, "Number of byzantine clients must be in [0, n_clients]."
+            assert 0 <= n_byzantine_clients <= self.config.n_clients, (
+                "Number of byzantine clients must be in [0, n_clients]."
+            )
             sys.stdout.write(f"{n_byzantine_clients} byzantine clients with attack {self.config.attack}.\n")
 
-            # Randomly pick n_byzantine_clients clients
-            byzantine_client_indices = torch.randperm(len(self.clients))[:n_byzantine_clients]
-            byzantine_ids_str = ', '.join(str(self.clients[int(x)].client_id) for x in byzantine_client_indices.tolist())
+            attack_selection_generator = torch.Generator(device="cpu")
+            attack_selection_generator.manual_seed((int(self.seed) + 7919) % (2 ** 63 - 1))
+            byzantine_client_indices = torch.randperm(
+                len(self.clients),
+                generator=attack_selection_generator,
+            )[:n_byzantine_clients]
+            byzantine_ids_str = ", ".join(
+                str(self.clients[int(x)].client_id) for x in byzantine_client_indices.tolist()
+            )
             sys.stdout.write(f"Client(s): {byzantine_ids_str} are byzantine.\n")
             for idx in byzantine_client_indices:
                 self.clients[idx].is_byzantine = True
 
-            # Set the attack
             try:
-                self.attack = getattr(attacks, self.config.attack)(clients=self.clients, config=self.config,
-                                                                   runner_instance=self)
+                self.attack = getattr(attacks, self.config.attack)(
+                    clients=self.clients,
+                    config=self.config,
+                    runner_instance=self,
+                )
             except AttributeError:
                 raise AttributeError(f"Attack {self.config.attack} not found.")
         else:
-            sys.stdout.write(f"No attack.\n")
-            assert self.config.n_byzantine_clients in [0, None, 'None'], "If no attack is used, n_byzantine_clients must be 0."
+            sys.stdout.write("No attack.\n")
+            assert self.config.n_byzantine_clients in [0, None, "None"], (
+                "If no attack is used, n_byzantine_clients must be 0."
+            )
             self.attack = attacks.NoAttack(clients=self.clients, config=self.config, runner_instance=self)
 
-        if self.config.defence not in [None, 'None', 'none']:
-            # Set the defence
+        if self.config.defence not in [None, "None", "none"]:
             if self.config.memory_method is not None:
-                robust_method = getattr(defences,
-                                        self.config.defence) 
-                if self.config.memory_method == 'expweights':
-                    self.defence = defences.choose_aggregation_expweights(robust_method)(clients=self.clients,
-                                                                                            config=self.config,
-                                                                                            runner_instance=self)
+                robust_method = getattr(defences, self.config.defence)
+                if self.config.memory_method == "expweights":
+                    self.defence = defences.choose_aggregation_expweights(robust_method)(
+                        clients=self.clients,
+                        config=self.config,
+                        runner_instance=self,
+                    )
                 else:
                     raise AttributeError(f"Memory method {self.config.memory_method} not found.")
             else:
                 try:
-                    self.defence = getattr(defences, self.config.defence)(clients=self.clients, config=self.config,
-                                                                          runner_instance=self)
+                    self.defence = getattr(defences, self.config.defence)(
+                        clients=self.clients,
+                        config=self.config,
+                        runner_instance=self,
+                    )
                 except AttributeError:
                     raise AttributeError(f"Defence {self.config.defence} not found.")
 
             sys.stdout.write(f"Using defence {self.config.defence}.\n")
         else:
-            sys.stdout.write(f"No defence.\n")
+            sys.stdout.write("No defence.\n")
             self.defence = defences.NoDefence(clients=self.clients, config=self.config, runner_instance=self)
 
-    # 为每个客户端初始化一个模型实例。
     def set_client_models(self):
-        """For each client: Initialize the models"""
+        """Initialize one model per client."""
         for client in self.clients:
             client.set_model(reinit=True, fileName=None)
 
-    # 为所有客户端创建或更新优化器和学习率调度器。
     def set_client_optimizers(self, reinit_optimizer: bool = True, lr_duration: Optional[int] = None):
-        """Sets the optimizers/schedulers of clients.
-        Args:
-            reinit_optimizer (bool): If True, the optimizers are reinitialized.
-            lr_duration (Optional[int]): If given, the learning rate is restarted for lr_duration epochs.
-        """
+        """Set optimizers and schedulers for all clients."""
         clients_train_on_public = self.strategy.do_clients_train_on_public_data()
-        add_public = 0 if not clients_train_on_public else len(self.dataloaders_public['train'])
+        add_public = 0 if not clients_train_on_public else len(self.dataloaders_public["train"])
         assert add_public == 0, "FED does not work with the current schedulers."
         for client in self.clients:
             n_batches_per_epoch = len(client.dataloader)
             n_epochs = lr_duration or self.config["n_total_local_epochs"]
-            client.set_optimizer_and_scheduler(n_epochs=n_epochs, n_batches_per_epoch=n_batches_per_epoch,
-                                               reinit_optimizer=reinit_optimizer)
+            client.set_optimizer_and_scheduler(
+                n_epochs=n_epochs,
+                n_batches_per_epoch=n_batches_per_epoch,
+                reinit_optimizer=reinit_optimizer,
+            )
 
-    # 为服务器模型创建或更新优化器和学习率调度器。
     def set_server_optimizer(self, reinit_server: bool, first_init: bool):
-        """Sets the optimizers/schedulers of the server.
-        Args:
-            reinit_server (bool): If True, the optimizer/scheduler is reinitialized and adapted to phase length.
-        """
+        """Set optimizer and scheduler for the server model."""
         n_base_epochs = self.config.n_server_epochs_per_round
 
         if reinit_server:
-            sys.stdout.write(f"Reinitializing server optimizer and scheduler.\n")
+            sys.stdout.write("Reinitializing server optimizer and scheduler.\n")
             n_epochs = n_base_epochs
         else:
             n_epochs = self.config.n_communications * n_base_epochs
         n_batches_per_epoch = len(self.server.dataloader)
-        self.server.set_optimizer_and_scheduler(n_epochs=n_epochs, n_batches_per_epoch=n_batches_per_epoch,
-                                                reinit_optimizer=(reinit_server or first_init))
+        self.server.set_optimizer_and_scheduler(
+            n_epochs=n_epochs,
+            n_batches_per_epoch=n_batches_per_epoch,
+            reinit_optimizer=(reinit_server or first_init),
+        )
 
     @torch.no_grad()
-    # 根据给定 dataloader 的真实标签和外部传入的预测张量，计算 ensemble 或聚合预测的准确率。
     def compute_accuracy(self, loader, prediction):
-        """
-        Compute accuracy on loader where prediction is a tensor containing all predictions of ensemble
-        Args:
-            loader (dataloader): Dataloader to evaluate
-            prediction (torch.tensor): Containing prediction on all samples.
-
-        Returns: Accuracy as float
-        """
-
-        sys.stdout.write(f"Evaluating accuracy of ensemble.\n")
+        """Compute accuracy for a tensor containing all predictions of an ensemble."""
+        sys.stdout.write("Evaluating accuracy of ensemble.\n")
         accuracy_meter = Accuracy(num_classes=self.n_classes).to(device=self.device)
         with tqdm(loader, leave=True) as pbar:
             for _, y_target, indices in pbar:
                 y_target = y_target.to(device=self.device)
                 accuracy_meter(prediction[indices], y_target)
-
         return accuracy_meter.compute()
 
     @torch.no_grad()
-    # 让所有客户端在公共数据集上前向推理，收集每个公共样本的逐样本 softmax 概率预测。
-    def get_client_predictions(self, mode: str):
-        """For each client: Predict the entire public train/test set and output for each sample the predicted probs.
-             For this to work, the indices of the subset must have been reset to start from zero.
-        Args:
-            mode (str): Either 'train' or 'test', depending on whether to use server.trainData or the test set
-        Returns: list of client predictions
-        """
-        assert mode in ['train', 'test']
+    def get_client_logits_and_predictions(self, mode: str):
+        """Collect client logits and softmax probabilities on the public train/test set."""
+        assert mode in ["train", "test"]
         loader = self.dataloaders_public[mode]
-        sys.stdout.write(f"\nCollecting predictions of all clients.\n")
+        sys.stdout.write("\nCollecting logits and predictions of all clients.\n")
 
-        prediction_store_tensors = [torch.zeros(len(loader.dataset), self.n_classes, device=self.device) for _ in
-                                    range(len(self.clients))]
+        logits_store_tensors = [
+            torch.zeros(len(loader.dataset), self.n_classes, device=self.device)
+            for _ in range(len(self.clients))
+        ]
+        prediction_store_tensors = [
+            torch.zeros(len(loader.dataset), self.n_classes, device=self.device)
+            for _ in range(len(self.clients))
+        ]
 
         with tqdm(loader, leave=True) as pbar:
             for x_input, _, indices in pbar:
-                x_input = x_input.to(self.device, non_blocking=True)  # Move to CUDA if possible
+                x_input = x_input.to(self.device, non_blocking=True)
                 with autocast(enabled=(self.use_amp is True)):
                     for client_idx, client in enumerate(self.clients):
-                        output = client.model.eval()(x_input)  # Logits
+                        output = client.model.eval()(x_input).float()
+                        probabilities = torch.nn.functional.softmax(output, dim=1)
+                        logits_store_tensors[client_idx][indices] = output.detach()
+                        prediction_store_tensors[client_idx][indices] = probabilities.detach()
 
-                        probabilities = torch.nn.functional.softmax(output, dim=1)  # Softmax(Logits)
-                        prediction_store_tensors[client_idx][indices] += probabilities
+        return logits_store_tensors, prediction_store_tensors
 
+    @torch.no_grad()
+    def get_client_predictions(self, mode: str):
+        """Collect only client softmax probabilities on public train/test data."""
+        _, prediction_store_tensors = self.get_client_logits_and_predictions(mode=mode)
         return prediction_store_tensors
 
-    # 用聚合后的公共数据软预测作为监督信号，对服务器或客户端模型进行蒸馏训练/评估。
+    def logits_to_probabilities(self, logits: torch.Tensor, temperature: Optional[float] = None):
+        """Convert uploaded/aggregated logits to soft labels for auditing or distillation."""
+        if temperature is None:
+            temperature = getattr(self.config, "distill_temperature", 1.0)
+        temperature = float(temperature or 1.0)
+        if temperature <= 0:
+            raise ValueError(f"distill_temperature must be positive, got {temperature}.")
+        return torch.nn.functional.softmax(logits / temperature, dim=1)
+
+    def logits_list_to_probabilities(self, client_logits_list, temperature: Optional[float] = None):
+        return [self.logits_to_probabilities(logits, temperature=temperature) for logits in client_logits_list]
+
     def distill(self, actor: Actor, avg_output: torch.tensor, is_training: bool = True):
-        """Train the actor (server, client) using averaged probabilities from all clients. If not is_training,
-        the actor is only evaluated on the public train set.
-        Args:
-            actor (Actor): Client or Server to train-distill
-            avg_output (torch.tensor): Tensor keeping averaged probs/predictions for each sample in pub trainData
-            is_training (bool): Whether to train the actor or only evaluate it
-        """
-        if actor.actor_type == 'server':
-            loader = self.dataloaders_public['train_server']
+        """Train or evaluate an actor using averaged public soft labels."""
+        if actor.actor_type == "server":
+            loader = self.dataloaders_public["train_server"]
         else:
-            loader = self.dataloaders_public['train']
+            loader = self.dataloaders_public["train"]
         sys.stdout.write(
-            f"\n{'Training' if is_training else 'Evaluating'} {actor.actor_name} on average prediction/probabilities"
-            f" (softmax).\n")
+            f"\n{'Training' if is_training else 'Evaluating'} {actor.actor_name} "
+            f"on temperature-softmax labels from aggregated logits.\n"
+        )
         with torch.set_grad_enabled(is_training):
             with tqdm(loader, leave=True) as pbar:
                 for x_input, _, indices in pbar:
-                    x_input = x_input.to(self.device, non_blocking=True)  # Move to CUDA if possible
-                    target = avg_output[indices].to(self.device, non_blocking=True)  # Avg probs/predictions of batch
+                    x_input = x_input.to(self.device, non_blocking=True)
+                    target = avg_output[indices].to(self.device, non_blocking=True)
                     actor.optimizer.zero_grad()
 
                     with autocast(enabled=(self.use_amp is True)):
-                        output = actor.model.train(mode=is_training)(x_input)  # Logits
-                        loss = actor.loss_criterion(output, target)
+                        output = actor.model.train(mode=is_training)(x_input)
+                        temperature = float(getattr(self.config, "distill_temperature", 1.0) or 1.0)
+                        student_log_probs = torch.nn.functional.log_softmax(output / temperature, dim=1)
+                        loss = torch.nn.functional.kl_div(
+                            student_log_probs, target, reduction="batchmean"
+                        ) * (temperature ** 2)
                     if is_training:
-                        actor.gradScaler.scale(loss).backward()  # AMP gradient scaling + Backpropagation
-                        actor.gradScaler.step(actor.optimizer)  # Optimization step
-                        actor.gradScaler.update()  # Update AMP gradScaler
+                        actor.gradScaler.scale(loss).backward()
+                        actor.gradScaler.step(actor.optimizer)
+                        actor.gradScaler.update()
                         actor.scheduler.step()
 
-                    if actor.actor_type == 'server':
-                        # We specify y_target as None, since it is not available
-                        actor.update_batch_metrics(mode='train', loss=loss, output=output, y_target=None)
+                    if actor.actor_type == "server":
+                        actor.update_batch_metrics(mode="train", loss=loss, output=output, y_target=None)
 
-    # 让诚实客户端在自己的私有训练数据上进行本地监督训练，并跳过被标记的恶意客户端。
     def train_client_local(self, n_epochs: int, current_round: int):
-        """Train each client locally on its private dataset for n_epochs."""
-        for epoch in range(1, n_epochs + 1, 1): # 表示这一轮每个客户端要训练几个本地 epoch。
+        """Train each non-active Byzantine client locally on its private dataset."""
+        for epoch in range(1, n_epochs + 1, 1):
             for client in self.clients:
-                client.reset_averaged_metrics()  # Reset metrics of clients 清空当前客户端上一轮/上一次累计的指标。
-                if client.is_byzantine and self.attack.is_attack_active(): # 判断当前客户端是不是恶意客户端，并且攻击是否已经开始。
+                client.reset_averaged_metrics()
+                if client.is_byzantine and self.attack.is_attack_active():
+                    trains_byzantine = getattr(self.attack, "trains_byzantine_locally", lambda: False)()
+                    if not trains_byzantine:
+                        sys.stdout.write(
+                            f"\nRound {current_round}/{self.config.n_communications} - "
+                            f"Local Epoch {epoch}/{n_epochs}: "
+                            f"Skipping active byzantine client-{client.client_id}."
+                        )
+                        continue
                     sys.stdout.write(
-                        f"\nRound {current_round}/{self.config.n_communications} - Local Epoch {epoch}/{n_epochs}: Skipping active byzantine client-{client.client_id}.")
-                    continue
-                sys.stdout.write(
-                    f"\nRound {current_round}/{self.config.n_communications} - Local Epoch {epoch}/{n_epochs}: Locally training client-{client.client_id}.")
-                self.train_epoch(actor=client, data='train', epoch=epoch)  # Train on private dataset 真正训练客户端。
-                # Evaluate
+                        f"\nRound {current_round}/{self.config.n_communications} - "
+                        f"Local Epoch {epoch}/{n_epochs}: Backdoor training client-{client.client_id}."
+                    )
+                    self.attack.train_byzantine_epoch(client=client, epoch=epoch, current_round=current_round)
+                else:
+                    sys.stdout.write(
+                        f"\nRound {current_round}/{self.config.n_communications} - "
+                        f"Local Epoch {epoch}/{n_epochs}: Locally training client-{client.client_id}."
+                    )
+                    self.train_epoch(actor=client, data="train", epoch=epoch)
                 if self.config.client_early_stopping:
-                    self.evaluate_model(actor=client, data='val')
-                if epoch == n_epochs: # 如果当前是本轮最后一个本地 epoch，就在公共测试集上评估客户端。
-                    self.evaluate_model(actor=client, data='test')
+                    self.evaluate_model(actor=client, data="val")
+                if epoch == n_epochs:
+                    self.evaluate_model(actor=client, data="test")
 
                 if self.config.client_early_stopping:
-                    # Save the checkpoint if it's better than the previous one
                     client.update_checkpoint()
 
-            self.log_clients_at_epoch_end(epoch=self.client_epochs_done + epoch,
-                                          commit=True)  # Log clients at the end of each epoch
+            self.log_clients_at_epoch_end(epoch=self.client_epochs_done + epoch, commit=True)
         self.client_epochs_done += n_epochs
 
     def maybe_audit_probe_predictions(self, client_prediction_list):
-        """Run probe auditing after attack perturbation and before aggregation."""
+        """Run probe auditing on probability tensors after attack perturbation."""
         if self.probe_auditor is None:
-            return None
+            return []
         return self.probe_auditor.audit(
             client_prediction_list=client_prediction_list,
             clients=self.clients,
             current_round=self.current_round,
         )
-    # FedDistill 的核心步骤，收集客户端公共数据预测、执行预测层防御聚合，并用聚合预测蒸馏服务器模型。
-    def collect_avg_output_and_distill_to_server(self):
-        sys.stdout.write(f"{self.config.attack}: Broadcasting clients predictions and applying attack.\n")
-        client_prediction_list = self.attack.get_perturbed_client_predictions()  # Attack perturbs the client predictions
-        self.maybe_audit_probe_predictions(client_prediction_list)
 
-        sys.stdout.write(f"{self.config.defence}: Averaging predictions with defence mechanism.\n")
+    def maybe_audit_probe_logits(self, client_logits_list):
+        """Audit uploaded logits by first converting them to probabilities."""
+        client_prediction_list = self.logits_list_to_probabilities(client_logits_list, temperature=1.0)
+        return self.maybe_audit_probe_predictions(client_prediction_list)
+
+    @torch.no_grad()
+    def maybe_evaluate_backdoor_asr(self):
+        """Evaluate attack success rate for input-trigger backdoor attacks."""
+        if not getattr(self.config, "evaluate_backdoor_asr", False):
+            return []
+        if self.current_round in [None, 0]:
+            return []
+        if self.attack is None or not hasattr(self.attack, "build_asr_batch"):
+            return []
+        if not self.attack.is_attack_active():
+            return []
+
+        frequency = int(getattr(self.config, "asr_eval_frequency", 1) or 1)
+        if frequency <= 0:
+            return []
+        is_final_round = int(self.current_round) == int(self.config.n_communications)
+        if int(self.current_round) % frequency != 0 and not is_final_round:
+            return []
+
+        data = str(getattr(self.config, "asr_eval_data", "test") or "test")
+        if data not in ["val", "test"]:
+            raise ValueError("Backdoor ASR needs labeled validation/test data; use asr_eval_data='val' or 'test'.")
+        if data not in self.dataloaders_public:
+            raise ValueError(f"ASR eval data '{data}' not found in public dataloaders.")
+        batch_limit = getattr(self.config, "asr_batch_limit", None)
+        batch_limit = None if batch_limit in [None, "None", "none"] else int(batch_limit)
+
+        loader = self.dataloaders_public[data]
+        successes = torch.zeros(len(self.clients), device=self.device)
+        totals = torch.zeros(len(self.clients), device=self.device)
+
+        sys.stdout.write(
+            f"\n[Backdoor ASR] Round {self.current_round}: evaluating triggered {data} samples.\n"
+        )
+        with tqdm(loader, leave=True) as pbar:
+            for batch_idx, (x_input, y_target, _) in enumerate(pbar):
+                if batch_limit is not None and batch_idx >= batch_limit:
+                    break
+                x_input = x_input.to(self.device, non_blocking=True)
+                y_target = y_target.to(self.device, non_blocking=True)
+                x_triggered, y_asr_target = self.attack.build_asr_batch(x_input, y_target)
+                if x_triggered is None:
+                    continue
+
+                for client_idx, client in enumerate(self.clients):
+                    with autocast(enabled=(self.use_amp is True)):
+                        output = client.model.eval()(x_triggered).float()
+                    predicted = output.argmax(dim=1)
+                    successes[client_idx] += (predicted == y_asr_target).sum()
+                    totals[client_idx] += y_asr_target.numel()
+
+        rows = []
+        for client_idx, client in enumerate(self.clients):
+            total = float(totals[client_idx].detach().cpu())
+            asr = 0.0 if total == 0 else float((successes[client_idx] / totals[client_idx]).detach().cpu())
+            rows.append({
+                "client_id": int(client.client_id),
+                "role": "malicious" if getattr(client, "is_byzantine", False) else "benign",
+                "asr": asr,
+                "n": int(total),
+            })
+
+        self.print_and_log_asr_rows(rows)
+        return rows
+
+    def print_and_log_asr_rows(self, rows):
+        """Print ASR rows and log them to wandb without committing the round."""
+        if not rows:
+            return
+
+        malicious = [row["asr"] for row in rows if row["role"] == "malicious"]
+        benign = [row["asr"] for row in rows if row["role"] == "benign"]
+        malicious_mean = sum(malicious) / len(malicious) if malicious else 0.0
+        benign_mean = sum(benign) / len(benign) if benign else 0.0
+        gap = malicious_mean - benign_mean
+
+        sys.stdout.write("client_id | role      | asr    | n_triggered\n")
+        for row in sorted(rows, key=lambda x: x["client_id"]):
+            sys.stdout.write(
+                f"{row['client_id']:<9} | {row['role']:<9} | "
+                f"{row['asr']:.4f} | {row['n']}\n"
+            )
+        sys.stdout.write(
+            f"ASR summary: malicious_mean={malicious_mean:.4f}, "
+            f"benign_mean={benign_mean:.4f}, gap={gap:.4f}\n"
+        )
+
+        if getattr(wandb, "run", None) is None:
+            return
+        log_dict = {
+            "backdoor/asr_mean_malicious": malicious_mean,
+            "backdoor/asr_mean_benign": benign_mean,
+            "backdoor/asr_gap": gap,
+            "backdoor/round": int(self.current_round),
+        }
+        for row in rows:
+            prefix = f"backdoor/client{row['client_id']}"
+            log_dict[f"{prefix}/asr"] = row["asr"]
+            log_dict[f"{prefix}/is_malicious"] = 1 if row["role"] == "malicious" else 0
+            log_dict[f"{prefix}/n_triggered"] = row["n"]
+        wandb.log(log_dict, commit=False)
+
+    def maybe_purify_suspicious_logits(self, client_logits_list, audit_rows):
+        """Purify selected clients' uploaded logits before defence aggregation."""
+        if self.diffusion_purifier is None:
+            return client_logits_list
+        if not audit_rows:
+            return client_logits_list
+
+        target = str(getattr(self.config, "diffusion_target", "yellow") or "yellow").lower()
+        yellow_low = float(getattr(self.config, "diffusion_yellow_low", 0.65))
+        yellow_high = float(getattr(self.config, "diffusion_yellow_high", 0.88))
+        red_threshold = float(getattr(self.config, "diffusion_red_threshold", yellow_high))
+
+        client_id_to_idx = {client.client_id: idx for idx, client in enumerate(self.clients)}
+        selected_indices = []
+        for row in audit_rows:
+            risk = float(row["risk"])
+            client_idx = client_id_to_idx.get(int(row["client_id"]))
+            if client_idx is None:
+                continue
+            if target == "yellow" and yellow_low <= risk < yellow_high:
+                selected_indices.append(client_idx)
+            elif target == "red" and risk >= red_threshold:
+                selected_indices.append(client_idx)
+            elif target in ["suspicious", "all_suspicious"] and risk >= yellow_low:
+                selected_indices.append(client_idx)
+            elif target == "all":
+                selected_indices.append(client_idx)
+
+        if not selected_indices:
+            return client_logits_list
+
+        selected_ids = [self.clients[idx].client_id for idx in selected_indices]
+        sys.stdout.write(
+            f"\nDiffusion purifier: purifying uploaded logits from client ids {selected_ids} "
+            f"with target='{target}'.\n"
+        )
+        purified_logits_list = list(client_logits_list)
+        for client_idx in selected_indices:
+            purified_logits = self.diffusion_purifier.purify(
+                client_logits_list[client_idx],
+                return_probs=False,
+            )
+            purified_logits_list[client_idx] = purified_logits.to(self.device)
+        return purified_logits_list
+
+    def collect_avg_output_and_distill_to_server(self):
+        """FedDistill core: collect logits, attack, probe, purify, aggregate, distill."""
+        sys.stdout.write(f"{self.config.attack}: Broadcasting client logits and applying attack.\n")
+        client_logits_list = self.attack.get_perturbed_client_logits()
+
+        audit_rows = self.maybe_audit_probe_logits(client_logits_list)
+        client_logits_list = self.maybe_purify_suspicious_logits(
+            client_logits_list=client_logits_list,
+            audit_rows=audit_rows,
+        )
+
+        sys.stdout.write(f"{self.config.defence}: Aggregating uploaded logits with defence mechanism.\n")
         defence_start = time.time()
-        averaged_predictions, mean_outlier_scores = self.defence.get_aggregated_predictions(client_prediction_list)
+        if not hasattr(self.defence, "get_aggregated_logits"):
+            raise AttributeError(
+                f"Defence {self.config.defence} must implement get_aggregated_logits for FedDistill logit upload."
+            )
+        averaged_logits, mean_outlier_scores = self.defence.get_aggregated_logits(client_logits_list)
+        if hasattr(self.attack, "record_aggregated_logits"):
+            self.attack.record_aggregated_logits(
+                aggregated_logits=averaged_logits,
+                client_logits_list=client_logits_list,
+            )
         self.defence_time = time.time() - defence_start
 
-        # Log the outlier scores
         indices = [idx for idx in range(len(mean_outlier_scores))]
         scores = [float(mean_outlier_scores[idx]) for idx in range(len(mean_outlier_scores))]
-        Utils.dump_bar_plot_to_wandb(x=indices, y=scores, xlabel="Client ID", ylabel="Outlier Score",
-                                     title="Mean Outlier Scores by Client Index",
-                                     wandb_identifier="outlier_scores")
+        Utils.dump_bar_plot_to_wandb(
+            x=indices,
+            y=scores,
+            xlabel="Client ID",
+            ylabel="Outlier Score",
+            title="Mean Logit Outlier Scores by Client Index",
+            wandb_identifier="outlier_scores",
+        )
 
-        sys.stdout.write(f"\nDistilling to server in round {self.current_round}/{self.config.n_communications}.")
+        averaged_soft_labels = self.logits_to_probabilities(averaged_logits)
+        sys.stdout.write(
+            f"\nDistilling to server in round {self.current_round}/{self.config.n_communications} "
+            f"with temperature={float(getattr(self.config, 'distill_temperature', 1.0) or 1.0)}."
+        )
         length = self.config.n_server_epochs_per_round
         for epoch in range(1, length + 1, 1):
             self.server.reset_averaged_metrics()
-            self.distill(actor=self.server, avg_output=averaged_predictions, is_training=True)
+            self.distill(actor=self.server, avg_output=averaged_soft_labels, is_training=True)
 
-            self.evaluate_model(actor=self.server, data='val')
-            self.evaluate_model(actor=self.server, data='test')
+            self.evaluate_model(actor=self.server, data="val")
+            self.evaluate_model(actor=self.server, data="test")
 
             if self.config.server_early_stopping:
-                # Save the checkpoint if it's better than the previous one
                 self.server.update_checkpoint()
 
             if epoch == length:
-                # We reset the server val and eval metrics, they have to be recomputed in the train function
                 self.server.reset_val_and_test_metrics()
-            self.log_server(epoch=self.server_epochs_done + epoch, commit=(epoch < length))  # Log server
-        self.total_bytes_communicated += Utils.calculate_communication_cost(client_prediction_list)
+            self.log_server(epoch=self.server_epochs_done + epoch, commit=(epoch < length))
+        self.total_bytes_communicated += Utils.calculate_communication_cost(client_logits_list)
         self.server_epochs_done += length
 
-        # Reset the model of the server to the best checkpoint, if early stopping is enabled
         if self.config.server_early_stopping:
             self.server.load_checkpoint()
 
-    # 联邦训练主循环，控制每轮广播、客户端本地训练、上行聚合/蒸馏、评估和日志记录。
     def train_federated(self):
         """Train the server and clients in a federated way."""
         for current_round in range(0, self.config.n_communications + 1, 1):
             self.current_round = current_round
             is_training = current_round > 0
             sys.stdout.write(f"\nFL - Round {current_round}/{self.config.n_communications}\n") if is_training \
-                else sys.stdout.write(f"\nFL - Evaluation round.\n")
+                else sys.stdout.write("\nFL - Evaluation round.\n")
             t_start = time.time()
 
-            # Reset the metrics of all actors
             for client in self.clients:
                 client.reset_averaged_metrics()
             self.server.reset_averaged_metrics()
-            
 
             if is_training:
-                # Before local training, the server potentially sends aggregated info to clients 服务器把当前模型下发给所有客户端。
-                self.strategy.before_local_training() 
-
-                # Determine the number of epochs for this round 计算这一轮客户端要训练几个本地 epoch。
-                round_n_epochs = self.strategy.get_phase_length(current_round=current_round) 
+                self.strategy.before_local_training()
+                round_n_epochs = self.strategy.get_phase_length(current_round=current_round)
 
                 if self.config.restart_client_lr:
                     self.set_client_optimizers(reinit_optimizer=False, lr_duration=round_n_epochs)
@@ -367,55 +555,56 @@ class ScratchRunner(BaseRunner):
                     self.server.set_model(reinit=True)
                     self.set_server_optimizer(reinit_server=self.config.reinit_server, first_init=False)
                 if self.config.warm_restarts:
-                    # Warmup the learning rate for the first 5% of the epochs
                     warmup_steps_client = int(0.05 * round_n_epochs * len(self.clients[0].dataloader))
-                    sys.stdout.write(f"Warming up momentum for 5% of the iterations.\n")
+                    sys.stdout.write("Warming up momentum for 5% of the iterations.\n")
                     for client in self.clients:
                         client.warmup_scheduler(warmup_steps=warmup_steps_client)
 
                     server_train_length = self.config.n_server_epochs_per_round or 0
                     if server_train_length > 0:
                         warmup_steps_server = int(
-                            0.05 * server_train_length * len(self.dataloaders_public['train_server']))
+                            0.05 * server_train_length * len(self.dataloaders_public["train_server"])
+                        )
                         self.server.warmup_scheduler(warmup_steps=warmup_steps_server)
 
-                self.train_client_local(n_epochs=round_n_epochs,
-                                        current_round=current_round)  # Clients train locally, then evaluate them 本地 epoch 数和当前通信轮数
+                self.train_client_local(n_epochs=round_n_epochs, current_round=current_round)
                 if self.config.client_early_stopping:
                     for client in self.clients:
                         client.load_checkpoint()
 
-                # After local training, the clients potentially sends aggregated info to the server
                 self.strategy.after_local_training()
             else:
                 round_n_epochs = 0
 
-            self.evaluate_model(actor=self.server, data='val')
-            self.evaluate_model(actor=self.server, data='test')
-            self.strategy.at_round_end()  # Strategy-specific actions at the end of the round
+            self.evaluate_model(actor=self.server, data="val")
+            self.evaluate_model(actor=self.server, data="test")
+            self.strategy.at_round_end()
+            self.maybe_evaluate_backdoor_asr()
             self.total_epochs_completed += round_n_epochs
-            self.log_at_round_end(round=current_round, round_n_epochs=round_n_epochs,
-                                  round_runtime=time.time() - t_start)
+            self.log_at_round_end(
+                round=current_round,
+                round_n_epochs=round_n_epochs,
+                round_runtime=time.time() - t_start,
+            )
 
-    # 完整实验入口，依次完成种子、模型、数据、优化器、攻防设置，并启动联邦训练。
     def run(self):
-        """Function controlling the workflow."""
-        # self.find_existing_seed()  # Check if artifact with same run_id exists, if so use the seed
+        """Complete experiment entrypoint."""
+        # self.find_existing_seed()
+        self.set_seed()
+        self.set_client_models()
+        self.server.set_model(reinit=True)
+        # self.save_artifact_seed()
 
-        # We initialize the models before actually setting the seed!
-        self.set_client_models()  # Each client inits its own model 给每个客户端创建一个模型。
-        self.server.set_model(reinit=True)  # Server inits its own model 给服务器创建模型。
-        self.set_seed()  # Set the seed 设置随机种子
-        # self.save_artifact_seed()  # Save the artifact for others to fetch from Wandb, if needed.
+        self.assign_dataloaders()
+        self.maybe_init_diffusion_purifier()
 
-        # We initialize the dataloaders after setting the seed!
-        self.assign_dataloaders()  # Assign dataloaders 加载数据集
+        self.set_client_optimizers()
+        self.set_server_optimizer(reinit_server=self.config.reinit_server, first_init=True)
 
-        self.set_client_optimizers() # 给每个客户端创建优化器和学习率调度器
-        self.set_server_optimizer(reinit_server=self.config.reinit_server, first_init=True)  # 给服务器模型创建优化器和学习率调度器。
+        self.set_attack_defence()
+        self.train_federated()
+        self.final_log()
 
-        self.set_attack_defence()  # Set attack and defence 根据配置创建攻击和防御对象，并随机标记恶意客户端。
 
-        self.train_federated() # 正式进入联邦训练主循环。每轮客户端训练、上传预测、攻击、防御、服务器蒸馏、探针审计都在这里触发。
-        self.final_log()  # Log all clients and server 训练结束后，重新评估所有客户端和服务器，并把最终指标写入 W&B。
+
 

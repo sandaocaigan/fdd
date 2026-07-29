@@ -30,6 +30,13 @@ class NoDefence:
         mean_outlier_scores = torch.mean(outlier_scores, dim=0)
         return avg_pred, mean_outlier_scores
 
+    def get_aggregated_logits(self, client_logits_list: list):
+        avg_logits = torch.mean(torch.stack(client_logits_list), dim=0)
+        logits_stack = torch.stack(client_logits_list).permute(1, 2, 0)
+        outlier_scores = torch.linalg.norm(logits_stack - avg_logits.unsqueeze(-1), dim=1)
+        mean_outlier_scores = torch.mean(outlier_scores, dim=0)
+        return avg_logits, mean_outlier_scores
+
 
 class PredictionMedian(NoDefence):
     """PredictionMedian defence"""
@@ -43,6 +50,13 @@ class PredictionMedian(NoDefence):
         outlier_scores = torch.linalg.norm(tensor_stack - median_probabilities, dim=2)
         mean_outlier_scores = torch.mean(outlier_scores, dim=1)
         return median_probabilities, mean_outlier_scores
+
+    def get_aggregated_logits(self, client_logits_list: list):
+        tensor_stack = torch.stack(client_logits_list)
+        median_logits = torch.quantile(tensor_stack, 0.5, dim=0, interpolation='nearest')
+        outlier_scores = torch.linalg.norm(tensor_stack - median_logits, dim=2)
+        mean_outlier_scores = torch.mean(outlier_scores, dim=1)
+        return median_logits, mean_outlier_scores
 
 class PredictionGeoMedian(NoDefence):
     """PredictionGeoMedian defence"""
@@ -60,6 +74,12 @@ class PredictionGeoMedian(NoDefence):
 
         mean_outlier_scores = torch.mean(outlier_scores, dim=0)
 
+        return geomedian, mean_outlier_scores
+
+    def get_aggregated_logits(self, client_logits_list: list):
+        logits_stack = torch.stack(client_logits_list)
+        geomedian, outlier_scores = Utils.geomedian(logits_stack)
+        mean_outlier_scores = torch.mean(outlier_scores, dim=0)
         return geomedian, mean_outlier_scores
 
 class PredictionFilter(NoDefence):
@@ -87,6 +107,9 @@ class PredictionFilter(NoDefence):
         mean_outlier_scores = torch.mean(torch.abs(outlier_scores).squeeze(-1), dim=0)
         return filtered_mean, mean_outlier_scores
 
+    def get_aggregated_logits(self, client_logits_list: list):
+        return self.get_aggregated_predictions(client_logits_list)
+
 
 class Cronus(NoDefence):
     """
@@ -106,7 +129,7 @@ class Cronus(NoDefence):
         k = int(quantile * pred_stack.size()[0])
         if k <1: k = 1
         _, idx = torch.topk(torch.abs(outlier_scores), k, dim=1,largest=False)  # return k smallest
-        reduced_pred = torch.zeros(k, pred_stack.size()[1], pred_stack.size()[2])
+        reduced_pred = torch.zeros(k, pred_stack.size()[1], pred_stack.size()[2], device=pred_stack.device, dtype=pred_stack.dtype)
         for i in range(pred_stack.size()[1]):
             nonzero = idx[i,:,0]
             reduced_pred[:,i,:] = pred_stack[nonzero,i,:]
@@ -118,6 +141,9 @@ class Cronus(NoDefence):
         outlier_scores = torch.linalg.norm(pred_stack.permute(1,2,0) - filtered_mean.unsqueeze(-1).to(pred_stack.device),dim=1)
         mean_outlier_scores = torch.mean(outlier_scores, dim=0)
         return filtered_mean, mean_outlier_scores
+
+    def get_aggregated_logits(self, client_logits_list: list):
+        return self.get_aggregated_predictions(client_logits_list)
 
 def choose_aggregation_expweights(aggregation_method):
     class ExpWeights(aggregation_method):
@@ -149,5 +175,14 @@ def choose_aggregation_expweights(aggregation_method):
             self.update_weights(mean_outlier_scores)
             weighted_pred, p = self.weighted_sum(pred_stack)
             return weighted_pred, p
+
+        @torch.no_grad()
+        def get_aggregated_logits(self, client_logits_list: list):
+            logits_stack = torch.stack(client_logits_list)
+            mean_logits, mean_outlier_scores = super().get_aggregated_logits(client_logits_list)
+            self.update_weights(mean_outlier_scores)
+            weighted_logits, p = self.weighted_sum(logits_stack)
+            return weighted_logits, p
     return ExpWeights
+
 

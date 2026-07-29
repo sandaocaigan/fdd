@@ -60,6 +60,7 @@ class BaseRunner:
         self.defence_time = None
         self.probe_metadata = None
         self.probe_auditor = None
+        self.diffusion_purifier = None
 
         # Configure working device (gpu/cpu, cudnn.benchmark)
         self.configure_comp_device()
@@ -105,8 +106,12 @@ class BaseRunner:
         """Sets the seed if existing, otherwise generates a new one, sets it and pushes it to Wandb.
         """
         if self.seed is None:
-            # Generate a random seed
-            self.seed = int((os.getpid() + 1) * time.time()) % 2 ** 32
+            configured_seed = getattr(self.config, "seed", None)
+            self.seed = (
+                int(configured_seed)
+                if configured_seed not in [None, "None", "none"]
+                else int((os.getpid() + 1) * time.time()) % 2 ** 32
+            )
 
         wandb.config.update({'seed': self.seed})  # Push the seed to wandb
 
@@ -114,8 +119,9 @@ class BaseRunner:
         np.random.seed(self.seed)
         torch.manual_seed(self.seed)
 
-        # Remark: If you are working with a multi-GPU model, this function is insufficient to get determinism. To seed all GPUs, use manual_seed_all().
-        torch.cuda.manual_seed(self.seed)  # This works if CUDA not available
+        torch.cuda.manual_seed_all(self.seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
     def assign_dataloaders(self):
         """Load datasets and split to clients, create dataloaders.
@@ -208,7 +214,14 @@ class BaseRunner:
             public_ds_name = public_datasetAssignmentDict[self.config.dataset]
         else:
             public_ds_name = self.config.public_ds
-        sys.stdout.write(f"Using public dataset: {public_ds_name}.\n")
+        if self.config.public_ds_fraction not in [None, 'none', 'None']:
+            sys.stdout.write(
+                f"Using public dataset: {self.config.dataset} training subset "
+                f"({len(trainData_public)} samples; public_ds_fraction="
+                f"{self.config.public_ds_fraction}).\n"
+            )
+        else:
+            sys.stdout.write(f"Using public dataset: {public_ds_name}.\n")
 
         trainData = {}
         if self.config.public_ds_fraction not in [None, 'none', 'None']:
@@ -262,7 +275,7 @@ class BaseRunner:
             sys.stdout.write(f"Client {client_id} has {len(client_data_split)} samples.\n")
 
     def maybe_wrap_public_datasets_with_probes(self, trainData: dict):
-        """Optionally replace a small subset of public samples with probe samples."""
+        """Optionally add active probes or audit untouched public samples."""
         if not getattr(self.config, 'use_probe', False):
             return trainData
 
@@ -276,6 +289,8 @@ class BaseRunner:
             probe_type=self.config.probe_type,
             probe_seed=self.config.probe_seed,
             mode=self.config.probe_mode,
+            blend_alpha=getattr(self.config, 'probe_blend_alpha', 0.5),
+            blend_mode=getattr(self.config, 'probe_blend_mode', 'random'),
             clip_min=getattr(self.config, 'probe_clip_min', None),
             clip_max=getattr(self.config, 'probe_clip_max', None),
         )
@@ -287,6 +302,8 @@ class BaseRunner:
             probe_seed=self.config.probe_seed,
             mode=self.config.probe_mode,
             metadata=client_dataset.metadata,
+            blend_alpha=getattr(self.config, 'probe_blend_alpha', 0.5),
+            blend_mode=getattr(self.config, 'probe_blend_mode', 'random'),
             clip_min=getattr(self.config, 'probe_clip_min', None),
             clip_max=getattr(self.config, 'probe_clip_max', None),
         )
@@ -294,20 +311,64 @@ class BaseRunner:
         trainData['client'] = client_dataset
         trainData['server'] = server_dataset
         self.probe_metadata = client_dataset.metadata
+        probe_target_class = getattr(self.config, 'probe_target_class', None)
+        if probe_target_class in [None, 'None', 'none']:
+            probe_target_class = getattr(self.config, 'backdoor_target_class', None)
+        probe_source_class = getattr(self.config, 'probe_source_class', None)
+        if probe_source_class in [None, 'None', 'none']:
+            probe_source_class = getattr(self.config, 'backdoor_source_class', None)
         self.probe_auditor = ProbeAuditor(
             probe_metadata=self.probe_metadata,
             n_classes=self.n_classes,
             start_round=getattr(self.config, 'probe_start_round', 1),
+            score_mode=getattr(self.config, 'probe_score', 'hybrid'),
+            target_class=probe_target_class,
+            source_class=probe_source_class,
             w_entropy=getattr(self.config, 'probe_w_entropy', 1.0),
             w_confidence=getattr(self.config, 'probe_w_confidence', 1.0),
             w_spc=getattr(self.config, 'probe_w_spc', 1.0),
+            w_target_bias=getattr(self.config, 'probe_w_target_bias', 0.0),
+            w_consensus=getattr(self.config, 'probe_w_consensus', 1.0),
+            w_label=getattr(self.config, 'probe_w_label', 1.0),
             log_each_round=getattr(self.config, 'probe_log_each_round', True),
         )
         sys.stdout.write(
             f"Using probe audit: {len(self.probe_metadata['probe_indices'])} probe samples "
-            f"from {len(self.probe_metadata['probe_groups'])} probe groups.\n"
+            f"from {len(self.probe_metadata['probe_groups'])} probe groups, "
+            f"mode={self.config.probe_mode}, type={self.config.probe_type}, "
+            f"score={getattr(self.config, 'probe_score', 'hybrid')}.\n"
         )
         return trainData
+
+    def maybe_init_diffusion_purifier(self):
+        """Optionally load the pretrained V1 diffusion logit purifier."""
+        if not getattr(self.config, 'use_diffusion_purifier', False):
+            self.diffusion_purifier = None
+            return
+
+        input_type = str(getattr(self.config, 'diffusion_input_type', 'logits') or 'logits').lower()
+        if input_type != 'logits':
+            raise NotImplementedError("V1 diffusion purifier only supports diffusion_input_type='logits'.")
+
+        sampler = str(getattr(self.config, 'diffusion_sampler', 'ddpm') or 'ddpm').lower()
+        if sampler not in ['ddpm', 'raw_ddpm']:
+            raise NotImplementedError("V1 diffusion purifier currently supports only diffusion_sampler='ddpm'.")
+
+        from diffusion_purifier import DiffusionLogitPurifier
+
+        self.diffusion_purifier = DiffusionLogitPurifier.from_checkpoint(
+            checkpoint_path=getattr(self.config, 'diffusion_ckpt', None),
+            device=self.device,
+            expected_dataset=self.config.dataset,
+            expected_n_classes=self.n_classes,
+            batch_size=getattr(self.config, 'diffusion_batch_size', 512),
+            diffusion_steps=getattr(self.config, 'diffusion_steps', 10),
+        )
+        sys.stdout.write(
+            f"Using diffusion purifier: {self.config.diffusion_ckpt}, "
+            f"steps={getattr(self.config, 'diffusion_steps', 10)}, "
+            f"target={getattr(self.config, 'diffusion_target', 'yellow')}.\n"
+        )
 
     def define_strategy(self):
         """Defines the training strategy.
@@ -383,6 +444,25 @@ class BaseRunner:
             prefix = actor.actor_type if actor.actor_type == 'server' else f"{actor.actor_type}{actor.client_id}"
             for metric_type, val in actor.get_metrics().items():
                 wandb.run.summary[f"final.{prefix}.{metric_type}"] = val
+        if client is None:
+            server_test_accuracy = self.server.get_metrics()["test"].get("accuracy")
+            server_test_accuracy = (
+                None
+                if server_test_accuracy is None
+                else float(server_test_accuracy.detach().cpu())
+            )
+            ensemble_test_accuracy = (
+                None
+                if self.ensemble_test_acc is None
+                else float(self.ensemble_test_acc.detach().cpu())
+            )
+            sys.stdout.write(
+                "Final accuracy summary: "
+                f"server_test_acc={server_test_accuracy}, "
+                f"client_ensemble_test_acc={ensemble_test_accuracy}.\n"
+            )
+            wandb.run.summary["final.server_test_acc"] = server_test_accuracy
+            wandb.run.summary["final.client_ensemble_test_acc"] = ensemble_test_accuracy
 
     def train_epoch(self, actor: Actor, data: str = 'train', is_training: bool = True, epoch: Optional[int] = None):
         """Train actor for a single epoch. Used also for evaluation.
