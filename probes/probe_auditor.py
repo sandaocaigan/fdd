@@ -11,7 +11,7 @@ import wandb
 
 
 class ProbeAuditor:
-    """Compute entropy, confidence, SPC, and a combined risk score for each client."""
+    """Compute prediction, hard-SPC, and soft multi-scale consistency audit metrics."""
 
     def __init__(
         self,
@@ -66,6 +66,7 @@ class ProbeAuditor:
             entropy = self._normalized_entropy(probe_predictions).mean()
             confidence = probe_predictions.max(dim=1).values.mean()
             spc = self._spc(predictions)
+            soft_spc_stats = self._soft_spc(predictions)
             target_bias_stats = self._target_bias(probe_predictions)
             consensus_stats = self._consensus_deviation(probe_predictions, consensus_predictions)
             label_stats = self._label_quality(probe_predictions)
@@ -77,6 +78,8 @@ class ProbeAuditor:
                 uncertainty_risk=uncertainty_risk,
                 confidence=confidence,
                 spc=spc,
+                soft_spc_tv_risk=soft_spc_stats["tv_risk"],
+                soft_spc_js_risk=soft_spc_stats["js_risk"],
                 target_bias_score=target_bias_stats["target_bias_score"],
                 consensus_risk=consensus_stats["consensus_risk"],
                 label_error=label_stats["label_error"],
@@ -93,6 +96,8 @@ class ProbeAuditor:
                 "entropy": float(entropy.detach().cpu()),
                 "confidence": float(confidence.detach().cpu()),
                 "spc": float(spc.detach().cpu()),
+                "soft_spc_tv": float(soft_spc_stats["tv_risk"].detach().cpu()),
+                "soft_spc_js": float(soft_spc_stats["js_risk"].detach().cpu()),
                 "target_prob": float(target_bias_stats["target_prob"].detach().cpu()),
                 "source_prob": float(target_bias_stats["source_prob"].detach().cpu()),
                 "target_bias": float(target_bias_stats["target_bias"].detach().cpu()),
@@ -120,6 +125,8 @@ class ProbeAuditor:
         uncertainty_risk,
         confidence,
         spc,
+        soft_spc_tv_risk,
+        soft_spc_js_risk,
         target_bias_score,
         consensus_risk,
         label_error,
@@ -132,6 +139,10 @@ class ProbeAuditor:
         spc_risk = (1.0 - spc).clamp(0.0, 1.0)
         if self.score_mode in ["spc", "spc_risk", "scale", "scale_risk", "consistency"]:
             return spc_risk, torch.tensor(1.0, device=spc_risk.device)
+        if self.score_mode in ["soft_spc_tv", "soft_tv", "tv_spc", "tv_consistency"]:
+            return soft_spc_tv_risk, torch.tensor(1.0, device=soft_spc_tv_risk.device)
+        if self.score_mode in ["soft_spc_js", "soft_js", "js_spc", "js_consistency"]:
+            return soft_spc_js_risk, torch.tensor(1.0, device=soft_spc_js_risk.device)
         if self.score_mode in ["hybrid", "consensus_spc", "probe_hybrid"]:
             consensus_weight = max(float(self.w_consensus), 0.0)
             spc_weight = max(float(self.w_spc), 0.0)
@@ -256,17 +267,58 @@ class ProbeAuditor:
             group_scores.append((group_pred == base_pred).float().mean())
         return torch.stack(group_scores).mean()
 
+    def _soft_spc(self, predictions: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Measure pairwise multi-scale probability divergence within each probe group.
+
+        TV and JS retain confidence changes that hard SPC discards.  Pairwise JS is
+        normalized by log(2), its maximum for two probability distributions, so
+        both returned values are risks in [0, 1].
+        """
+        zero = torch.tensor(0.0, device=predictions.device, dtype=predictions.dtype)
+        if not self.probe_groups:
+            return {"tv_risk": zero, "js_risk": zero}
+
+        tv_scores = []
+        js_scores = []
+        eps = torch.finfo(predictions.dtype).eps
+        for group in self.probe_groups:
+            if len(group) < 2:
+                continue
+            group_probabilities = predictions[group].clamp_min(eps)
+            left, right = torch.triu_indices(
+                len(group), len(group), offset=1, device=predictions.device
+            )
+            first = group_probabilities[left]
+            second = group_probabilities[right]
+
+            total_variation = 0.5 * torch.abs(first - second).sum(dim=1)
+            midpoint = 0.5 * (first + second)
+            js_divergence = 0.5 * (
+                (first * (first.log() - midpoint.log())).sum(dim=1)
+                + (second * (second.log() - midpoint.log())).sum(dim=1)
+            )
+            tv_scores.append(total_variation.mean())
+            js_scores.append((js_divergence / math.log(2.0)).mean())
+
+        if not tv_scores:
+            return {"tv_risk": zero, "js_risk": zero}
+        return {
+            "tv_risk": torch.stack(tv_scores).mean().clamp(0.0, 1.0),
+            "js_risk": torch.stack(js_scores).mean().clamp(0.0, 1.0),
+        }
+
     def print_rows(self, rows: List[Dict], current_round: Optional[int]):
         sys.stdout.write(f"\n[Probe Audit] Round {current_round}\n")
         sys.stdout.write(
-            "client_id | role      | entropy | confidence | spc    | "
+            "client_id | role      | entropy | confidence | spc    | soft_tv | soft_js | "
             "consensus | label_p | target_p | target_bias | risk\n"
         )
         for row in sorted(rows, key=lambda x: x["client_id"]):
             sys.stdout.write(
                 f"{row['client_id']:<9} | {row['role']:<9} | "
                 f"{row['entropy']:.4f}  | {row['confidence']:.4f}     | "
-                f"{row['spc']:.4f} | {row['consensus_risk']:.4f}    | "
+                f"{row['spc']:.4f} | {row['soft_spc_tv']:.4f}  | "
+                f"{row['soft_spc_js']:.4f}  | {row['consensus_risk']:.4f}    | "
                 f"{row['label_prob']:.4f}  | {row['target_prob']:.4f}   | "
                 f"{row['target_bias']:.4f}      | {row['risk']:.4f}\n"
             )
@@ -280,6 +332,8 @@ class ProbeAuditor:
             log_dict[f"{prefix}/entropy"] = row["entropy"]
             log_dict[f"{prefix}/confidence"] = row["confidence"]
             log_dict[f"{prefix}/spc"] = row["spc"]
+            log_dict[f"{prefix}/soft_spc_tv"] = row["soft_spc_tv"]
+            log_dict[f"{prefix}/soft_spc_js"] = row["soft_spc_js"]
             log_dict[f"{prefix}/target_prob"] = row["target_prob"]
             log_dict[f"{prefix}/source_prob"] = row["source_prob"]
             log_dict[f"{prefix}/target_bias"] = row["target_bias"]
