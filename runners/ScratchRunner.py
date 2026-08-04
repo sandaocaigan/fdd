@@ -324,6 +324,67 @@ class ScratchRunner(BaseRunner):
         client_prediction_list = self.logits_list_to_probabilities(client_logits_list, temperature=1.0)
         return self.maybe_audit_probe_predictions(client_prediction_list)
 
+    def validate_probe_core_sigma_filter_configuration(self):
+        """Reject aggregation combinations whose client indexing changes after filtering."""
+        if not getattr(self.config, "probe_core_sigma_filter", False):
+            return
+
+        if not getattr(self.config, "use_probe", False):
+            raise ValueError("probe_core_sigma_filter requires use_probe=true.")
+        if int(self.config.n_clients) < 4:
+            raise ValueError("probe_core_sigma_filter requires at least four clients.")
+
+        attack_name = str(getattr(self.config, "attack", "") or "").lower()
+        if attack_name == "manipulatingkd":
+            raise ValueError(
+                "probe_core_sigma_filter is incompatible with ManipulatingKD, which records "
+                "client uploads using the original client-list indices."
+            )
+        if getattr(self.config, "memory_method", None) not in [None, "None", "none"]:
+            raise ValueError(
+                "probe_core_sigma_filter is incompatible with memory_method / ExpWeights."
+            )
+        defence_name = str(getattr(self.config, "defence", "") or "").lower()
+        if defence_name == "cronus":
+            raise ValueError("probe_core_sigma_filter is incompatible with Cronus.")
+
+    def maybe_filter_core_sigma_logits(self, client_logits_list, audit_rows):
+        """Remove only Soft-JS core-sigma flags before the current-round aggregation."""
+        all_client_ids = [client.client_id for client in self.clients]
+        if not getattr(self.config, "probe_core_sigma_filter", False):
+            return client_logits_list, all_client_ids
+        if len(client_logits_list) != len(self.clients):
+            raise ValueError(
+                "probe_core_sigma_filter expects exactly one uploaded logit tensor per client."
+            )
+        if not audit_rows:
+            return client_logits_list, all_client_ids
+
+        client_id_to_index = {client.client_id: idx for idx, client in enumerate(self.clients)}
+        flagged_ids = {
+            int(row["client_id"])
+            for row in audit_rows
+            if bool(row.get("core_sigma_flagged", False))
+        }
+        flagged_indices = {
+            client_id_to_index[client_id]
+            for client_id in flagged_ids
+            if client_id in client_id_to_index
+        }
+        retained_indices = [
+            index for index in range(len(client_logits_list)) if index not in flagged_indices
+        ]
+        if not retained_indices:
+            raise RuntimeError("probe_core_sigma_filter removed every client upload.")
+
+        retained_ids = [all_client_ids[index] for index in retained_indices]
+        sys.stdout.write(
+            "[Probe Core-Sigma Filter] "
+            f"excluded client ids={sorted(flagged_ids)}; retained {len(retained_ids)}/"
+            f"{len(all_client_ids)} client uploads.\n"
+        )
+        return [client_logits_list[index] for index in retained_indices], retained_ids
+
     @torch.no_grad()
     def maybe_evaluate_backdoor_asr(self):
         """Evaluate attack success rate for input-trigger backdoor attacks."""
@@ -475,9 +536,14 @@ class ScratchRunner(BaseRunner):
         """FedDistill core: collect logits, attack, probe, purify, aggregate, distill."""
         sys.stdout.write(f"{self.config.attack}: Broadcasting client logits and applying attack.\n")
         client_logits_list = self.attack.get_perturbed_client_logits()
+        uploaded_logits_list = client_logits_list
 
         audit_rows = self.maybe_audit_probe_logits(client_logits_list)
         client_logits_list = self.maybe_purify_suspicious_logits(
+            client_logits_list=client_logits_list,
+            audit_rows=audit_rows,
+        )
+        client_logits_list, retained_client_ids = self.maybe_filter_core_sigma_logits(
             client_logits_list=client_logits_list,
             audit_rows=audit_rows,
         )
@@ -496,14 +562,21 @@ class ScratchRunner(BaseRunner):
             )
         self.defence_time = time.time() - defence_start
 
-        indices = [idx for idx in range(len(mean_outlier_scores))]
+        if getattr(self.config, "probe_core_sigma_filter", False):
+            if len(mean_outlier_scores) != len(retained_client_ids):
+                raise RuntimeError(
+                    "Defence returned an outlier-score count inconsistent with retained client uploads."
+                )
+            indices = retained_client_ids
+        else:
+            indices = [idx for idx in range(len(mean_outlier_scores))]
         scores = [float(mean_outlier_scores[idx]) for idx in range(len(mean_outlier_scores))]
         Utils.dump_bar_plot_to_wandb(
             x=indices,
             y=scores,
             xlabel="Client ID",
             ylabel="Outlier Score",
-            title="Mean Logit Outlier Scores by Client Index",
+            title="Mean Logit Outlier Scores by Client ID",
             wandb_identifier="outlier_scores",
         )
 
@@ -526,7 +599,7 @@ class ScratchRunner(BaseRunner):
             if epoch == length:
                 self.server.reset_val_and_test_metrics()
             self.log_server(epoch=self.server_epochs_done + epoch, commit=(epoch < length))
-        self.total_bytes_communicated += Utils.calculate_communication_cost(client_logits_list)
+        self.total_bytes_communicated += Utils.calculate_communication_cost(uploaded_logits_list)
         self.server_epochs_done += length
 
         if self.config.server_early_stopping:
@@ -589,6 +662,7 @@ class ScratchRunner(BaseRunner):
 
     def run(self):
         """Complete experiment entrypoint."""
+        self.validate_probe_core_sigma_filter_configuration()
         # self.find_existing_seed()
         self.set_seed()
         self.set_client_models()

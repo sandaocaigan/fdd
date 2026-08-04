@@ -28,6 +28,8 @@ class ProbeAuditor:
         w_consensus: float = 1.0,
         w_label: float = 1.0,
         log_each_round: bool = True,
+        core_sigma_enabled: bool = False,
+        core_sigma_threshold: float = 5.0,
     ):
         self.probe_metadata = probe_metadata or {}
         self.probe_indices = [int(x) for x in self.probe_metadata.get("probe_indices", [])]
@@ -45,6 +47,10 @@ class ProbeAuditor:
         self.w_consensus = float(w_consensus)
         self.w_label = float(w_label)
         self.log_each_round = bool(log_each_round)
+        self.core_sigma_enabled = bool(core_sigma_enabled)
+        self.core_sigma_threshold = float(core_sigma_threshold)
+        if self.core_sigma_threshold <= 0:
+            raise ValueError("probe_core_sigma_threshold must be positive.")
 
     def should_audit(self, current_round: Optional[int]) -> bool:
         if not self.probe_indices:
@@ -106,12 +112,79 @@ class ProbeAuditor:
                 "label_error": float(label_stats["label_error"].detach().cpu()),
                 "has_valid_labels": bool(label_stats["has_valid_labels"]),
                 "risk": float(risk.detach().cpu()),
+                "core_sigma_core": False,
+                "core_sigma_center": None,
+                "core_sigma_std": None,
+                "core_sigma_cutoff": None,
+                "core_sigma_z": None,
+                "core_sigma_flagged": False,
             })
 
-        if self.log_each_round:
+        if self.core_sigma_enabled:
+            self._apply_core_sigma(rows)
+
+        if self.log_each_round or self.core_sigma_enabled:
             self.print_rows(rows=rows, current_round=current_round)
             self.log_to_wandb(rows=rows, current_round=current_round)
         return rows
+
+    def _apply_core_sigma(self, rows: List[Dict]):
+        """Flag high Soft-JS clients against the densest half of this round.
+
+        This uses each client's within-probe Soft-JS value only.  Client roles,
+        consensus scores, and the composite probe risk are deliberately ignored.
+        """
+        if len(rows) < 4:
+            sys.stdout.write(
+                "[Probe Core-Sigma] Abstaining: at least four audited clients are required.\n"
+            )
+            return
+
+        values = torch.tensor([row["soft_spc_js"] for row in rows], dtype=torch.float64)
+        core_size = int(math.ceil(len(rows) / 2.0))
+        sorted_indices = torch.argsort(values).tolist()
+        global_median = torch.quantile(values, 0.5)
+
+        best_indices = None
+        best_key = None
+        for start in range(len(rows) - core_size + 1):
+            window_indices = sorted_indices[start:start + core_size]
+            window = values[window_indices]
+            window_range = float((window[-1] - window[0]).item())
+            center_distance = float(torch.abs(torch.quantile(window, 0.5) - global_median).item())
+            key = (window_range, center_distance, start)
+            if best_key is None or key < best_key:
+                best_key = key
+                best_indices = window_indices
+
+        core_values = values[best_indices]
+        center = torch.quantile(core_values, 0.5)
+        core_std = torch.std(core_values, correction=1)
+        core_ids = [rows[idx]["client_id"] for idx in best_indices]
+        if not torch.isfinite(core_std) or float(core_std.item()) <= 1e-8:
+            sys.stdout.write(
+                "[Probe Core-Sigma] Abstaining: benign-core Soft-JS standard deviation is near zero "
+                f"(core ids={sorted(core_ids)}).\n"
+            )
+            return
+
+        cutoff = center + self.core_sigma_threshold * core_std
+        for index, row in enumerate(rows):
+            value = values[index]
+            row["core_sigma_core"] = index in best_indices
+            row["core_sigma_center"] = float(center.item())
+            row["core_sigma_std"] = float(core_std.item())
+            row["core_sigma_cutoff"] = float(cutoff.item())
+            row["core_sigma_z"] = float(((value - center) / core_std).item())
+            row["core_sigma_flagged"] = bool(value > cutoff)
+
+        flagged_ids = [row["client_id"] for row in rows if row["core_sigma_flagged"]]
+        sys.stdout.write(
+            "[Probe Core-Sigma] "
+            f"core ids={sorted(core_ids)}, center={float(center.item()):.6f}, "
+            f"std={float(core_std.item()):.6f}, threshold={self.core_sigma_threshold:.2f}, "
+            f"cutoff={float(cutoff.item()):.6f}, flagged ids={flagged_ids}.\n"
+        )
 
     def _normalized_entropy(self, probabilities: torch.Tensor) -> torch.Tensor:
         eps = 1e-12
@@ -309,19 +382,25 @@ class ProbeAuditor:
 
     def print_rows(self, rows: List[Dict], current_round: Optional[int]):
         sys.stdout.write(f"\n[Probe Audit] Round {current_round}\n")
-        sys.stdout.write(
+        header = (
             "client_id | role      | entropy | confidence | spc    | soft_tv | soft_js | "
-            "consensus | label_p | target_p | target_bias | risk\n"
+            "consensus | label_p | target_p | target_bias | risk"
         )
+        if self.core_sigma_enabled:
+            header += "   | core_flag"
+        sys.stdout.write(header + "\n")
         for row in sorted(rows, key=lambda x: x["client_id"]):
-            sys.stdout.write(
+            line = (
                 f"{row['client_id']:<9} | {row['role']:<9} | "
                 f"{row['entropy']:.4f}  | {row['confidence']:.4f}     | "
                 f"{row['spc']:.4f} | {row['soft_spc_tv']:.4f}  | "
                 f"{row['soft_spc_js']:.4f}  | {row['consensus_risk']:.4f}    | "
                 f"{row['label_prob']:.4f}  | {row['target_prob']:.4f}   | "
-                f"{row['target_bias']:.4f}      | {row['risk']:.4f}\n"
+                f"{row['target_bias']:.4f}      | {row['risk']:.4f}"
             )
+            if self.core_sigma_enabled:
+                line += f" | {'yes' if row['core_sigma_flagged'] else 'no'}"
+            sys.stdout.write(line + "\n")
 
     def log_to_wandb(self, rows: List[Dict], current_round: Optional[int]):
         if getattr(wandb, "run", None) is None:
@@ -342,6 +421,19 @@ class ProbeAuditor:
             log_dict[f"{prefix}/label_error"] = row["label_error"]
             log_dict[f"{prefix}/risk"] = row["risk"]
             log_dict[f"{prefix}/is_malicious"] = 1 if row["role"] == "malicious" else 0
+            if self.core_sigma_enabled:
+                log_dict[f"{prefix}/core_sigma_core"] = int(row["core_sigma_core"])
+                log_dict[f"{prefix}/core_sigma_flagged"] = int(row["core_sigma_flagged"])
+                if row["core_sigma_center"] is not None:
+                    log_dict[f"{prefix}/core_sigma_center"] = row["core_sigma_center"]
+                    log_dict[f"{prefix}/core_sigma_std"] = row["core_sigma_std"]
+                    log_dict[f"{prefix}/core_sigma_cutoff"] = row["core_sigma_cutoff"]
+                    log_dict[f"{prefix}/core_sigma_z"] = row["core_sigma_z"]
         if current_round is not None:
             log_dict["probe/round"] = int(current_round)
+        if self.core_sigma_enabled:
+            log_dict["probe/core_sigma_threshold"] = self.core_sigma_threshold
+            log_dict["probe/core_sigma_flagged_count"] = sum(
+                int(row["core_sigma_flagged"]) for row in rows
+            )
         wandb.log(log_dict, commit=False)

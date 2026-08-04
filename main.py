@@ -140,6 +140,10 @@ defaults = dict(
     probe_log_each_round=True,
     probe_clip_min=None,
     probe_clip_max=None,
+    # Core-sigma filtering uses only within-client Soft-JS probe consistency.
+    probe_core_sigma_audit=False,
+    probe_core_sigma_filter=False,
+    probe_core_sigma_threshold=5.0,
 
     # V1 raw Unet1D diffusion purifier settings
     use_diffusion_purifier=False,
@@ -195,6 +199,7 @@ def _coerce_cli_value(key, value, default):
         "probe_w_target_bias", "probe_w_consensus", "probe_w_label",
         "probe_clip_min", "probe_clip_max", "diffusion_red_threshold",
         "diffusion_yellow_low", "diffusion_yellow_high",
+        "probe_core_sigma_threshold",
         "manipkd_lr", "manipkd_lambda_l2", "manipkd_lambda_range",
         "manipkd_lambda_moments", "manipkd_lambda_entropy", "manipkd_lambda_outlier",
         "manipkd_q_low", "manipkd_q_high", "manipkd_q_radius", "manipkd_q_outlier",
@@ -205,7 +210,8 @@ def _coerce_cli_value(key, value, default):
         "use_amp", "client_early_stopping", "server_early_stopping",
         "restart_client_lr", "reinit_server", "warm_restarts",
         "hips", "evaluate_backdoor_asr", "use_probe", "probe_log_each_round", "use_diffusion_purifier",
-        "diffusion_entropy_calibration", "manipkd_project",
+        "diffusion_entropy_calibration", "manipkd_project", "probe_core_sigma_audit",
+        "probe_core_sigma_filter",
     }
 
     if key in int_keys:
@@ -276,4 +282,3 @@ with tempdir() as tmp_dir:
 
     if os.path.exists(wandb_dir_path):
         shutil.rmtree(wandb_dir_path)
-

@@ -331,6 +331,11 @@ class BaseRunner:
             w_consensus=getattr(self.config, 'probe_w_consensus', 1.0),
             w_label=getattr(self.config, 'probe_w_label', 1.0),
             log_each_round=getattr(self.config, 'probe_log_each_round', True),
+            core_sigma_enabled=(
+                getattr(self.config, 'probe_core_sigma_audit', False)
+                or getattr(self.config, 'probe_core_sigma_filter', False)
+            ),
+            core_sigma_threshold=getattr(self.config, 'probe_core_sigma_threshold', 5.0),
         )
         sys.stdout.write(
             f"Using probe audit: {len(self.probe_metadata['probe_indices'])} probe samples "
