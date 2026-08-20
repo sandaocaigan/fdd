@@ -1,4 +1,4 @@
-# ===========================================================================
+﻿# ===========================================================================
 # Project:      On the Byzantine-Resilience of Distillation-Based Federated Learning - IOL Lab @ ZIB
 # Paper:        arxiv.org/abs/2402.12265
 # File:         main.py
@@ -48,8 +48,8 @@ defaults = dict(
     n_clients=10,
 
     # FL settings
-    n_total_local_epochs=50,
-    n_communications=50,
+    n_total_local_epochs=50, # 本地epoch数
+    n_communications=50, # 通信轮数
     n_server_epochs_per_round=1,
     server_lr="(Linear, 0.1)",
     client_lr="(Linear, 0.1)",
@@ -63,9 +63,21 @@ defaults = dict(
     # Attacks and defences
     defence=None,
     attack="CPA",
-    n_byzantine_clients=2,
+    n_byzantine_clients=2, # 恶意数量
     filter_threshold=None,
     filter_quantile=None,
+    # Logit-space robust aggregation baselines.
+    trimean_trim_ratio=0.2,
+    krum_f=None,
+    # With Probe filtering, assume at most this many Byzantine uploads remain.
+    krum_residual_f=3,
+    krum_fallback="mean",
+    krum_num_selected=1,
+    afa_xi=2.0,
+    afa_delta_xi=0.5,
+    afa_prior_alpha=3.0,
+    afa_prior_beta=3.0,
+    afa_block_threshold=0.95,
     memory_method=None,
     expweights=None,
     exp_stepsize=None,
@@ -118,12 +130,12 @@ defaults = dict(
     asr_batch_limit=None,
 
     # Probe audit settings
-    attack_start_round=15,
+    attack_start_round=15, #攻击启用轮数
     use_probe=True,
     probe_mode="replace",
     probe_type="scale",
     probe_score="hybrid",
-    probe_base_count=20,
+    probe_base_count=20, #多少基础探针图
     probe_scales="1.0,1.2,1.5,2.0",
     probe_seed=0,
     probe_start_round=15,
@@ -186,11 +198,14 @@ def _coerce_cli_value(key, value, default):
         "asr_batch_limit",
         "diffusion_batch_size", "backdoor_target_class", "backdoor_source_class",
         "backdoor_trigger_size", "manipkd_steps", "manipkd_log_every", "manipkd_history_rounds",
-        "manipkd_trim_count", "manipkd_geomedian_iters",
+        "manipkd_trim_count", "manipkd_geomedian_iters", "krum_f", "krum_residual_f",
+        "krum_num_selected",
     }
     float_keys = {
         "momentum", "weight_decay", "public_ds_fraction",
         "filter_threshold", "filter_quantile", "expweights",
+        "trimean_trim_ratio", "afa_xi", "afa_delta_xi", "afa_prior_alpha", "afa_prior_beta",
+        "afa_block_threshold",
         "exp_stepsize", "sample_attack_frac", "distill_temperature",
         "backdoor_poison_rate", "backdoor_upload_rate", "backdoor_trigger_value",
         "logit_gaussian_scale",

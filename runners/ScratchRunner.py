@@ -554,6 +554,8 @@ class ScratchRunner(BaseRunner):
             raise AttributeError(
                 f"Defence {self.config.defence} must implement get_aggregated_logits for FedDistill logit upload."
             )
+        if hasattr(self.defence, "set_active_client_ids"):
+            self.defence.set_active_client_ids(retained_client_ids)
         averaged_logits, mean_outlier_scores = self.defence.get_aggregated_logits(client_logits_list)
         if hasattr(self.attack, "record_aggregated_logits"):
             self.attack.record_aggregated_logits(
