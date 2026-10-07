@@ -380,6 +380,8 @@ class ManipulatingKD(NoAttack):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._paper_history = []
+        self._paper_previous_delta = None
+        self._validate_paper_pl_defence()
 
     def _cfg(self, name, default=None):
         try:
@@ -390,6 +392,21 @@ class ManipulatingKD(NoAttack):
             except Exception:
                 value = default
         return default if value in [None, "None", "none"] else value
+
+    def _validate_paper_pl_defence(self):
+        formulation = str(self._cfg("manipkd_formulation", "paper")).lower()
+        knowledge = str(self._cfg("manipkd_knowledge", "full_local")).lower().replace("-", "_")
+        defence = str(self._cfg("defence", "NoDefence") or "NoDefence").lower()
+        if (
+            formulation in ["paper", "original"]
+            and knowledge in ["partial", "partial_local", "pl", "colluding_only"]
+            and defence not in ["nodefence", "no_defence", "none", "mean", "average"]
+        ):
+            raise ValueError(
+                "Paper P-L currently supports only NoDefence/mean aggregation. "
+                "Its benign-sum reconstruction is invalid for nonlinear defences "
+                "such as Krum, TriMean, or AFA."
+            )
 
     def _constraint_enabled(self, name):
         constraints = str(self._cfg("manipkd_constraints", "l2,range,moments,entropy,outlier")).lower()
@@ -672,6 +689,16 @@ class ManipulatingKD(NoAttack):
     def _paper_mse_per_sample(left, right):
         return (left - right).pow(2).mean(dim=-1)
 
+    @torch.no_grad()
+    def _project_paper_mse_ball(self, candidate, center, allowed_mse):
+        """Project each public sample onto its paper MSE constraint ball."""
+        delta = candidate - center
+        current_mse = self._paper_mse_per_sample(candidate, center)
+        scale = torch.sqrt(
+            allowed_mse.clamp_min(0.0) / current_mse.clamp_min(1e-24)
+        ).clamp(max=1.0)
+        candidate.copy_(center + delta * scale.unsqueeze(1))
+
     def _paper_kl_per_sample(self, reference_logits, poisoned_logits):
         temperature = float(self._cfg("distill_temperature", 1.0) or 1.0)
         if temperature <= 0:
@@ -731,18 +758,18 @@ class ManipulatingKD(NoAttack):
             ).max(dim=0).values
         elif knowledge in ["partial", "partial_local", "pl", "colluding_only"]:
             model_name = "P-L"
-            required_history = max(int(self._cfg("manipkd_history_rounds", 5) or 5), 1)
-            if len(self._paper_history) < required_history:
+            self._validate_paper_pl_defence()
+            if not self._paper_history:
                 print(
-                    f"[ManipulatingKD paper P-L] warmup: {len(self._paper_history)}/{required_history} "
-                    "aggregate broadcasts available; uploading clean logits."
+                    "[ManipulatingKD paper P-L] warmup: 0/1 aggregate broadcasts "
+                    "available; uploading clean logits."
                 )
                 return client_logits_list
-            history = self._paper_history[-required_history:]
-            estimated_benign_sum = torch.stack([
-                item["aggregate"] * n_clients - item["malicious_uploads"].sum(dim=0)
-                for item in history
-            ], dim=0).mean(dim=0)
+            latest_history = self._paper_history[-1]
+            estimated_benign_sum = (
+                latest_history["aggregate"] * n_clients
+                - latest_history["malicious_uploads"].sum(dim=0)
+            )
             reference_aggregate = (
                 estimated_benign_sum + clean_malicious.sum(dim=0)
             ) / float(n_clients)
@@ -759,51 +786,121 @@ class ManipulatingKD(NoAttack):
         else:
             raise NotImplementedError(f"Unknown paper ManipulatingKD knowledge mode '{knowledge}'.")
 
-        candidate = clean_malicious.mean(dim=0).detach().clone().requires_grad_(True)
+        candidate = clean_malicious.mean(dim=0).detach().clone()
+        initial_center = candidate.detach().clone()
+        allowed_mse = (n_malicious * max_reference_distance).clamp_min(0.0)
+        warm_started = False
+        if model_name == "P-L" and self._paper_previous_delta is not None:
+            previous_delta = self._paper_previous_delta
+            if previous_delta.shape == candidate.shape:
+                candidate.copy_(reference_center + previous_delta.to(candidate.device))
+                self._project_paper_mse_ball(candidate, reference_center, allowed_mse)
+                warm_started = True
+
         # KL is stationary when the candidate exactly equals the clean aggregate.
         # Start inside Eq. (5)'s feasible ball so gradient ascent can leave that point.
         noise_scale = float(self._cfg("manipkd_noise_std", 0.01) or 0.0)
-        if noise_scale > 0:
+        if noise_scale > 0 and not warm_started:
             with torch.no_grad():
                 direction = self._attack_randn_like(candidate)
                 direction = direction / direction.norm(dim=1, keepdim=True).clamp_min(1e-12)
-                feasible_radius = (n_malicious * max_reference_distance).clamp_min(0.0).sqrt()
+                feasible_radius = allowed_mse.sqrt()
+                if model_name == "P-L":
+                    # MSE averages over classes, whereas direction has unit L2 norm.
+                    feasible_radius = feasible_radius * candidate.shape[1] ** 0.5
                 candidate.add_(noise_scale * feasible_radius.unsqueeze(1) * direction)
+        if model_name == "P-L":
+            self._project_paper_mse_ball(candidate, reference_center, allowed_mse)
+        optimization_start = candidate.detach().clone()
+        with torch.no_grad():
+            initial_aggregate = (honest_sum + n_malicious * candidate) / float(n_clients)
+            kl_before = self._paper_kl_per_sample(
+                reference_aggregate, initial_aggregate
+            ).mean()
+
         dual = torch.zeros_like(max_reference_distance)
         steps = max(int(self._cfg("manipkd_steps", 30) or 30), 1)
         primal_lr = float(self._cfg("manipkd_lr", 0.05) or 0.05)
         dual_lr = float(self._cfg("manipkd_lagrange_lr", 1.0) or 1.0)
+        gradient_norm_first = None
+        gradient_norm_last = None
 
         for _ in range(steps):
+            candidate.requires_grad_(True)
             poisoned_aggregate = (honest_sum + n_malicious * candidate) / float(n_clients)
             divergence = self._paper_kl_per_sample(reference_aggregate, poisoned_aggregate)
             constraint = (
                 self._paper_mse_per_sample(candidate, reference_center)
-                - n_malicious * max_reference_distance
+                - allowed_mse
             )
-            objective = divergence.mean() - (dual * constraint).mean()
+            if model_name == "P-L":
+                # Every public sample owns an independent candidate row. Summing
+                # avoids shrinking each row's gradient by the public-set size.
+                objective = divergence.sum() - (dual * constraint).sum()
+            else:
+                objective = divergence.mean() - (dual * constraint).mean()
             gradient, = torch.autograd.grad(objective, candidate)
+            gradient_norm = torch.linalg.norm(gradient.detach(), dim=1).mean().item()
+            if gradient_norm_first is None:
+                gradient_norm_first = gradient_norm
+            gradient_norm_last = gradient_norm
             with torch.no_grad():
                 candidate.add_(primal_lr * gradient)
-                dual.copy_(torch.clamp(dual + dual_lr * constraint, min=0.0))
+                if model_name == "P-L":
+                    updated_constraint = (
+                        self._paper_mse_per_sample(candidate, reference_center)
+                        - allowed_mse
+                    )
+                    dual.copy_(torch.clamp(dual + dual_lr * updated_constraint, min=0.0))
+                    self._project_paper_mse_ball(candidate, reference_center, allowed_mse)
+                else:
+                    dual.copy_(torch.clamp(dual + dual_lr * constraint, min=0.0))
+                candidate.requires_grad_(False)
 
         with torch.no_grad():
             poisoned_aggregate = (honest_sum + n_malicious * candidate) / float(n_clients)
             divergence = self._paper_kl_per_sample(reference_aggregate, poisoned_aggregate)
             constraint = (
                 self._paper_mse_per_sample(candidate, reference_center)
-                - n_malicious * max_reference_distance
+                - allowed_mse
             )
             violation_rate = (constraint > 1e-6).float().mean()
+            candidate_offset_mse = self._paper_mse_per_sample(candidate, initial_center)
+            candidate_offset_l2 = torch.linalg.norm(candidate - initial_center, dim=1)
+            offset_ratio = candidate_offset_mse / allowed_mse.clamp_min(1e-12)
+            optimization_delta_l2 = torch.linalg.norm(candidate - optimization_start, dim=1)
+            aggregate_logit_shift = torch.linalg.norm(
+                poisoned_aggregate - reference_aggregate, dim=1
+            )
+            aggregate_top1_change = (
+                poisoned_aggregate.argmax(dim=1) != reference_aggregate.argmax(dim=1)
+            ).float().mean()
 
         perturbed_logits = list(client_logits_list)
         optimized_upload = candidate.detach()
+        if model_name == "P-L":
+            self._paper_previous_delta = (
+                optimized_upload - reference_center
+            ).detach().clone()
         for client_idx in byzantine_indices:
             perturbed_logits[client_idx] = optimized_upload.clone()
         print(
             f"[ManipulatingKD paper {model_name}] shared malicious upload optimized: "
             f"KL={float(divergence.mean()):.6f}, constraint_mean={float(constraint.mean()):.6f}, "
             f"violation_rate={float(violation_rate):.4f}, steps={steps}."
+        )
+        print(
+            f"[ManipulatingKD diagnostics] KL_before={float(kl_before):.8f}, "
+            f"KL_after={float(divergence.mean()):.8f}, "
+            f"candidate_offset_mse={float(candidate_offset_mse.mean()):.8f}, "
+            f"candidate_offset_l2={float(candidate_offset_l2.mean()):.8f}, "
+            f"offset_ratio={float(offset_ratio.mean()):.6f}, "
+            f"offset_ratio_max={float(offset_ratio.max()):.6f}, "
+            f"optimization_delta_l2={float(optimization_delta_l2.mean()):.3e}, "
+            f"grad_first={gradient_norm_first:.3e}, grad_last={gradient_norm_last:.3e}, "
+            f"aggregate_shift={float(aggregate_logit_shift.mean()):.8f}, "
+            f"aggregate_top1_change={float(aggregate_top1_change):.6f}, "
+            f"warm_started={warm_started}."
         )
         return perturbed_logits
 

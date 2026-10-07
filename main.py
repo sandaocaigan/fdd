@@ -58,6 +58,12 @@ defaults = dict(
     warm_restarts=None,
     public_ds=None,
     public_ds_fraction=None,
+    # Reproducible in-domain public data for CIFAR-10 experiments.
+    public_split_mode="fixed_stratified",
+    public_samples_per_class=500,
+    public_val_samples_per_class=250,
+    public_split_seed=20260805,
+    public_split_manifest="splits/cifar10_public_500x10_seed20260805.json",
     distill_temperature=1.0,
 
     # Attacks and defences
@@ -89,7 +95,8 @@ defaults = dict(
     manipkd_formulation="paper",
     manipkd_steps=30,
     manipkd_lagrange_lr=1.0,
-    manipkd_history_rounds=5,
+    # P-L currently uses the latest aggregate; this controls retained history only.
+    manipkd_history_rounds=1,
     manipkd_lr=0.05,
     manipkd_target="least_likely",
     manipkd_knowledge="full_local",
@@ -199,7 +206,8 @@ def _coerce_cli_value(key, value, default):
         "diffusion_batch_size", "backdoor_target_class", "backdoor_source_class",
         "backdoor_trigger_size", "manipkd_steps", "manipkd_log_every", "manipkd_history_rounds",
         "manipkd_trim_count", "manipkd_geomedian_iters", "krum_f", "krum_residual_f",
-        "krum_num_selected",
+        "krum_num_selected", "public_samples_per_class", "public_val_samples_per_class",
+        "public_split_seed",
     }
     float_keys = {
         "momentum", "weight_decay", "public_ds_fraction",

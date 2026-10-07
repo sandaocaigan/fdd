@@ -1,4 +1,4 @@
-# ===========================================================================
+﻿# ===========================================================================
 # Project:      On the Byzantine-Resilience of Distillation-Based Federated Learning - IOL Lab @ ZIB
 # Paper:        arxiv.org/abs/2402.12265
 # File:         runners/ScratchRunner.py
@@ -614,15 +614,15 @@ class ScratchRunner(BaseRunner):
             is_training = current_round > 0
             sys.stdout.write(f"\nFL - Round {current_round}/{self.config.n_communications}\n") if is_training \
                 else sys.stdout.write("\nFL - Evaluation round.\n")
-            t_start = time.time()
+            t_start = time.time() # 记录
 
             for client in self.clients:
                 client.reset_averaged_metrics()
             self.server.reset_averaged_metrics()
 
             if is_training:
-                self.strategy.before_local_training()
-                round_n_epochs = self.strategy.get_phase_length(current_round=current_round)
+                self.strategy.before_local_training() # 下发服务器模型
+                round_n_epochs = self.strategy.get_phase_length(current_round=current_round) # 计算本地epoch
 
                 if self.config.restart_client_lr:
                     self.set_client_optimizers(reinit_optimizer=False, lr_duration=round_n_epochs)
@@ -647,7 +647,7 @@ class ScratchRunner(BaseRunner):
                     for client in self.clients:
                         client.load_checkpoint()
 
-                self.strategy.after_local_training()
+                self.strategy.after_local_training() # 服务器当前模型复制给所有客户端。
             else:
                 round_n_epochs = 0
 
@@ -664,22 +664,22 @@ class ScratchRunner(BaseRunner):
 
     def run(self):
         """Complete experiment entrypoint."""
-        self.validate_probe_core_sigma_filter_configuration()
+        self.validate_probe_core_sigma_filter_configuration() #检查spc
         # self.find_existing_seed()
         self.set_seed()
-        self.set_client_models()
-        self.server.set_model(reinit=True)
+        self.set_client_models() # 客户端
+        self.server.set_model(reinit=True) # 服务器(重新初始化模型)
         # self.save_artifact_seed()
 
-        self.assign_dataloaders()
+        self.assign_dataloaders()  # 加载数据集
         self.maybe_init_diffusion_purifier()
 
         self.set_client_optimizers()
         self.set_server_optimizer(reinit_server=self.config.reinit_server, first_init=True)
 
-        self.set_attack_defence()
-        self.train_federated()
-        self.final_log()
+        self.set_attack_defence() # 选恶意客户端
+        self.train_federated() # 主循环
+        self.final_log() # 汇总指标
 
 
 

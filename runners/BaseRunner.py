@@ -21,6 +21,7 @@ import strategies
 from actors import Client, Server, Actor
 from config import (datasetDict, n_classesDict, num_workersDict,
                     testTransformDict, trainTransformDict)
+from data_splits import ReindexedSubset, load_and_validate_fixed_split
 from public_config import (public_datasetAssignmentDict, public_trainDataset_dict, public_testDataset_dict)
 from utilities import Utilities as Utils
 
@@ -97,6 +98,24 @@ class BaseRunner:
          The rest should be checked in the strategy.
         """
         assert self.config.n_clients > 0, "There must be at least one client."
+        split_mode = str(getattr(self.config, "public_split_mode", "legacy") or "legacy").lower()
+        if split_mode not in ["fixed_stratified", "legacy"]:
+            raise ValueError(
+                "public_split_mode must be 'fixed_stratified' or 'legacy'."
+            )
+        if self.config.dataset == "cifar10" and split_mode == "fixed_stratified":
+            if self.config.public_ds not in [None, "none", "None"]:
+                raise ValueError(
+                    "public_ds must be none when public_split_mode=fixed_stratified."
+                )
+            if self.config.public_ds_fraction not in [None, "none", "None"]:
+                raise ValueError(
+                    "public_ds_fraction must be none when public_split_mode=fixed_stratified."
+                )
+            if int(self.config.public_samples_per_class) <= 0:
+                raise ValueError("public_samples_per_class must be positive.")
+            if int(self.config.public_val_samples_per_class) < 0:
+                raise ValueError("public_val_samples_per_class cannot be negative.")
         # assert self.config.strategy in ['Pretrain','FED','FEDSB','FedAVG', 'FedDF'], 'The chosen strategy is not implemented'
 
         # Verify input to the strategy
@@ -185,64 +204,61 @@ class BaseRunner:
                                                                                      self.config.dataset])
 
 
-        n_val_samples_public = int(0.05 * len(trainData))  # Split off some validation data from the entire training set
-        n_train_samples = len(trainData) - n_val_samples_public
-        # If we use a separate public DS, the no. of public samples from the whole dataset is zero
-        #
+        split_mode = str(getattr(self.config, "public_split_mode", "legacy") or "legacy").lower()
+        use_fixed_cifar10_split = (
+            self.config.dataset == "cifar10" and split_mode == "fixed_stratified"
+        )
 
-        if self.config.public_ds_fraction not in [None, 'none', 'None']:
-            n_train_samples_public = int(self.config.public_ds_fraction * n_train_samples)
-            # We have split a fraction of the train dataset to use as a public dataset
-            # Reset indices of trainData_public, needed for correct averaging of outputs
-        else:
-            n_train_samples_public = 0
-        n_train_samples_private = n_train_samples - n_train_samples_public
-
-        trainData_private, trainData_public, valData_public = torch.utils.data.random_split(trainData,
-                                                                                            [
-                                                                                                n_train_samples_private,
-                                                                                                n_train_samples_public,
-                                                                                                n_val_samples_public],
-                                                                                            generator=torch.Generator().manual_seed(
-                                                                                                self.seed))
-
-        if self.config.public_ds_fraction not in [None, 'none', 'None']:
-            Utils.reset_dataset_subset_indices(dataset=trainData_public)
-
-        # We specify separate public datasets for clients and server (same dataset, potentially different transforms)
-        if self.config.public_ds in [None, 'none', 'None']:
-            public_ds_name = public_datasetAssignmentDict[self.config.dataset]
-        else:
-            public_ds_name = self.config.public_ds
-        if self.config.public_ds_fraction not in [None, 'none', 'None']:
-            sys.stdout.write(
-                f"Using public dataset: {self.config.dataset} training subset "
-                f"({len(trainData_public)} samples; public_ds_fraction="
-                f"{self.config.public_ds_fraction}).\n"
+        if use_fixed_cifar10_split:
+            trainData_private, trainData, valData_public = self._build_fixed_cifar10_split(
+                private_base_dataset=trainData
             )
         else:
-            sys.stdout.write(f"Using public dataset: {public_ds_name}.\n")
+            n_val_samples_public = int(0.05 * len(trainData))
+            n_train_samples = len(trainData) - n_val_samples_public
+            if self.config.public_ds_fraction not in [None, 'none', 'None']:
+                n_train_samples_public = int(self.config.public_ds_fraction * n_train_samples)
+            else:
+                n_train_samples_public = 0
+            n_train_samples_private = n_train_samples - n_train_samples_public
 
-        trainData = {}
-        if self.config.public_ds_fraction not in [None, 'none', 'None']:
-            for actor in ['client', 'server']:
-                # this code assumes we use augmenations
-                trainData[actor] = trainData_public
-        else:
-            for actor in ['client', 'server']:
-                if actor == 'client':
-                    public_ds = public_testDataset_dict[public_ds_name]
-                elif actor == 'server':
-                    public_ds = public_trainDataset_dict[public_ds_name]
-                public_ds_rootPath = './datasets_pytorch/' + public_ds_name
-                if public_ds_name == 'cinic10':
-                    # use the validation split as the public dataset
-                    public_ds_rootPath = os.path.join(public_ds_rootPath, 'valid')
-                if public_ds_name == 'clothing1m':
-                    # use the validation split as the public dataset
-                    public_ds_rootPath = os.path.join(self.dataset_rootPath, 'unlabeled')
-                initialized_pub_ds = Utils.get_index_dataset(public_ds)(root=public_ds_rootPath)                    
-                trainData[actor] = initialized_pub_ds
+            trainData_private, trainData_public, valData_public = torch.utils.data.random_split(
+                trainData,
+                [n_train_samples_private, n_train_samples_public, n_val_samples_public],
+                generator=torch.Generator().manual_seed(self.seed),
+            )
+
+            if self.config.public_ds in [None, 'none', 'None']:
+                public_ds_name = public_datasetAssignmentDict[self.config.dataset]
+            else:
+                public_ds_name = self.config.public_ds
+
+            trainData = {}
+            if self.config.public_ds_fraction not in [None, 'none', 'None']:
+                trainData_public = ReindexedSubset(
+                    trainData_public.dataset, trainData_public.indices
+                )
+                sys.stdout.write(
+                    f"Using public dataset: {self.config.dataset} training subset "
+                    f"({len(trainData_public)} samples; public_ds_fraction="
+                    f"{self.config.public_ds_fraction}).\n"
+                )
+                for actor in ['client', 'server']:
+                    trainData[actor] = trainData_public
+            else:
+                sys.stdout.write(f"Using public dataset: {public_ds_name}.\n")
+                for actor in ['client', 'server']:
+                    if actor == 'client':
+                        public_ds = public_testDataset_dict[public_ds_name]
+                    else:
+                        public_ds = public_trainDataset_dict[public_ds_name]
+                    public_ds_rootPath = './datasets_pytorch/' + public_ds_name
+                    if public_ds_name == 'cinic10':
+                        public_ds_rootPath = os.path.join(public_ds_rootPath, 'valid')
+                    if public_ds_name == 'clothing1m':
+                        public_ds_rootPath = os.path.join(self.dataset_rootPath, 'unlabeled')
+                    initialized_pub_ds = Utils.get_index_dataset(public_ds)(root=public_ds_rootPath)
+                    trainData[actor] = initialized_pub_ds
 
 
         trainData = self.maybe_wrap_public_datasets_with_probes(trainData)
@@ -273,6 +289,66 @@ class BaseRunner:
             client_data_split = trainData_private_split[client_id - 1]
             client.assign_dataset(trainData=client_data_split)
             sys.stdout.write(f"Client {client_id} has {len(client_data_split)} samples.\n")
+
+    def _build_fixed_cifar10_split(self, private_base_dataset):
+        """Build fixed, balanced and mutually disjoint CIFAR-10 data subsets."""
+
+        manifest_path = self.config.public_split_manifest
+        (
+            public_indices,
+            validation_indices,
+            private_indices,
+            manifest_digest,
+            public_counts,
+            validation_counts,
+        ) = load_and_validate_fixed_split(
+            path=manifest_path,
+            targets=private_base_dataset.targets,
+            expected_public_per_class=int(self.config.public_samples_per_class),
+            expected_validation_per_class=int(self.config.public_val_samples_per_class),
+            expected_seed=int(self.config.public_split_seed),
+        )
+
+        indexed_dataset = Utils.get_index_dataset(datasetDict["cifar10"])
+        deterministic_base_dataset = indexed_dataset(
+            root=self.dataset_rootPath,
+            train=True,
+            download=True,
+            transform=testTransformDict["cifar10"],
+        )
+
+        private_dataset = torch.utils.data.Subset(private_base_dataset, private_indices)
+        public_client_dataset = ReindexedSubset(deterministic_base_dataset, public_indices)
+        public_server_dataset = ReindexedSubset(deterministic_base_dataset, public_indices)
+        validation_dataset = ReindexedSubset(deterministic_base_dataset, validation_indices)
+
+        public_set = set(public_indices)
+        validation_set = set(validation_indices)
+        private_set = set(private_indices)
+        assert public_set.isdisjoint(validation_set)
+        assert public_set.isdisjoint(private_set)
+        assert validation_set.isdisjoint(private_set)
+        assert len(public_set | validation_set | private_set) == len(private_base_dataset)
+
+        sys.stdout.write("Using fixed stratified CIFAR-10 public dataset.\n")
+        sys.stdout.write(f"Public split manifest: {manifest_path}.\n")
+        sys.stdout.write(f"Public split seed: {self.config.public_split_seed}.\n")
+        sys.stdout.write(
+            f"Public samples: {len(public_indices)}; class counts: {public_counts}.\n"
+        )
+        sys.stdout.write(
+            f"Validation samples: {len(validation_indices)}; class counts: "
+            f"{validation_counts}.\n"
+        )
+        sys.stdout.write(f"Private samples: {len(private_indices)}.\n")
+        sys.stdout.write("Public/private/validation overlap: 0.\n")
+        sys.stdout.write(f"Split manifest content SHA256: {manifest_digest}.\n")
+
+        public_datasets = {
+            "client": public_client_dataset,
+            "server": public_server_dataset,
+        }
+        return private_dataset, public_datasets, validation_dataset
 
     def maybe_wrap_public_datasets_with_probes(self, trainData: dict):
         """Optionally add active probes or audit untouched public samples."""
