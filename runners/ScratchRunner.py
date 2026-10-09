@@ -325,7 +325,7 @@ class ScratchRunner(BaseRunner):
         return self.maybe_audit_probe_predictions(client_prediction_list)
 
     def validate_probe_core_sigma_filter_configuration(self):
-        """Reject aggregation combinations whose client indexing changes after filtering."""
+        """Reject aggregation combinations that cannot consume a filtered upload list."""
         if not getattr(self.config, "probe_core_sigma_filter", False):
             return
 
@@ -334,12 +334,6 @@ class ScratchRunner(BaseRunner):
         if int(self.config.n_clients) < 4:
             raise ValueError("probe_core_sigma_filter requires at least four clients.")
 
-        attack_name = str(getattr(self.config, "attack", "") or "").lower()
-        if attack_name == "manipulatingkd":
-            raise ValueError(
-                "probe_core_sigma_filter is incompatible with ManipulatingKD, which records "
-                "client uploads using the original client-list indices."
-            )
         if getattr(self.config, "memory_method", None) not in [None, "None", "none"]:
             raise ValueError(
                 "probe_core_sigma_filter is incompatible with memory_method / ExpWeights."
@@ -561,6 +555,7 @@ class ScratchRunner(BaseRunner):
             self.attack.record_aggregated_logits(
                 aggregated_logits=averaged_logits,
                 client_logits_list=client_logits_list,
+                client_ids=retained_client_ids,
             )
         self.defence_time = time.time() - defence_start
 

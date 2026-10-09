@@ -711,21 +711,83 @@ class ManipulatingKD(NoAttack):
         ).sum(dim=1)
 
     @torch.no_grad()
-    def record_aggregated_logits(self, aggregated_logits, client_logits_list):
-        """Store public aggregate broadcasts and malicious uploads for P-L."""
-        byzantine_indices = [
-            idx for idx, client in enumerate(self.clients) if client.is_byzantine
-        ]
-        if not byzantine_indices:
+    def record_aggregated_logits(self, aggregated_logits, client_logits_list, client_ids=None):
+        """Store the retained cohort needed to reconstruct the P-L honest mean."""
+        if not any(client.is_byzantine for client in self.clients):
             return
+        if client_ids is None:
+            client_ids = [client.client_id for client in self.clients]
+        if len(client_logits_list) != len(client_ids):
+            raise ValueError(
+                "ManipulatingKD history requires one stable client ID per aggregated upload."
+            )
+
+        clients_by_id = {int(client.client_id): client for client in self.clients}
+        retained_client_ids = [int(client_id) for client_id in client_ids]
+        unknown_ids = [
+            client_id for client_id in retained_client_ids if client_id not in clients_by_id
+        ]
+        if unknown_ids:
+            raise ValueError(
+                f"ManipulatingKD history received unknown client IDs: {unknown_ids}."
+            )
+
+        retained_malicious_uploads = [
+            logits.detach()
+            for client_id, logits in zip(retained_client_ids, client_logits_list)
+            if clients_by_id[client_id].is_byzantine
+        ]
+        retained_count = len(retained_client_ids)
+        retained_malicious_count = len(retained_malicious_uploads)
+        retained_honest_count = retained_count - retained_malicious_count
+        if retained_honest_count <= 0:
+            print(
+                "[ManipulatingKD P-L history] skipped aggregate with no retained "
+                "honest client uploads."
+            )
+            return
+
+        if retained_malicious_uploads:
+            malicious_uploads = torch.stack(retained_malicious_uploads, dim=0).clone()
+        else:
+            malicious_uploads = aggregated_logits.detach().new_empty(
+                (0,) + tuple(aggregated_logits.shape)
+            )
         self._paper_history.append({
             "aggregate": aggregated_logits.detach().clone(),
-            "malicious_uploads": torch.stack(
-                [client_logits_list[idx].detach() for idx in byzantine_indices], dim=0
-            ).clone(),
+            "malicious_uploads": malicious_uploads,
+            "retained_client_ids": tuple(retained_client_ids),
+            "retained_count": retained_count,
+            "retained_malicious_count": retained_malicious_count,
+            "retained_honest_count": retained_honest_count,
         })
         keep = max(int(self._cfg("manipkd_history_rounds", 5) or 5), 1)
         self._paper_history = self._paper_history[-keep:]
+        print(
+            "[ManipulatingKD P-L history] "
+            f"retained={retained_count}, honest={retained_honest_count}, "
+            f"malicious={retained_malicious_count}."
+        )
+
+    def _estimate_paper_benign_sum(self, current_honest_count):
+        """Scale the latest retained honest mean to the current honest cohort."""
+        if not self._paper_history:
+            return None
+        latest_history = self._paper_history[-1]
+        retained_count = int(latest_history["retained_count"])
+        retained_honest_count = int(latest_history["retained_honest_count"])
+        if retained_honest_count <= 0:
+            return None
+
+        aggregate = latest_history["aggregate"]
+        malicious_uploads = latest_history["malicious_uploads"]
+        if malicious_uploads.shape[0] > 0:
+            retained_malicious_sum = malicious_uploads.sum(dim=0)
+        else:
+            retained_malicious_sum = torch.zeros_like(aggregate)
+        retained_honest_sum = aggregate * retained_count - retained_malicious_sum
+        retained_honest_mean = retained_honest_sum / float(retained_honest_count)
+        return retained_honest_mean * float(current_honest_count)
 
     def _get_paper_perturbed_client_logits(self):
         """Implement the paper's F-L/P-L ManipulatingKD objectives (Eq. 16-23)."""
@@ -765,11 +827,15 @@ class ManipulatingKD(NoAttack):
                     "available; uploading clean logits."
                 )
                 return client_logits_list
-            latest_history = self._paper_history[-1]
-            estimated_benign_sum = (
-                latest_history["aggregate"] * n_clients
-                - latest_history["malicious_uploads"].sum(dim=0)
+            estimated_benign_sum = self._estimate_paper_benign_sum(
+                current_honest_count=len(honest_indices)
             )
+            if estimated_benign_sum is None:
+                print(
+                    "[ManipulatingKD paper P-L] no valid retained honest history; "
+                    "uploading clean logits."
+                )
+                return client_logits_list
             reference_aggregate = (
                 estimated_benign_sum + clean_malicious.sum(dim=0)
             ) / float(n_clients)
