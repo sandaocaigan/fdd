@@ -55,6 +55,8 @@ defaults = dict(
     client_lr="(Linear, 0.1)",
     restart_client_lr=None,
     reinit_server=None,
+    # Optional supervised initialization trained only on the fixed public split.
+    server_init_ckpt=None,
     warm_restarts=None,
     public_ds=None,
     public_ds_fraction=None,

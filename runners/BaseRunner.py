@@ -23,6 +23,7 @@ from config import (datasetDict, n_classesDict, num_workersDict,
                     testTransformDict, trainTransformDict)
 from data_splits import ReindexedSubset, load_and_validate_fixed_split
 from public_config import (public_datasetAssignmentDict, public_trainDataset_dict, public_testDataset_dict)
+from server_pretraining import validate_server_initialization_config
 from utilities import Utilities as Utils
 
 
@@ -62,6 +63,8 @@ class BaseRunner:
         self.probe_metadata = None
         self.probe_auditor = None
         self.diffusion_purifier = None
+        self.public_split_manifest_digest = None
+        self.public_split_public_samples = None
 
         # Configure working device (gpu/cpu, cudnn.benchmark)
         self.configure_comp_device()
@@ -116,6 +119,12 @@ class BaseRunner:
                 raise ValueError("public_samples_per_class must be positive.")
             if int(self.config.public_val_samples_per_class) < 0:
                 raise ValueError("public_val_samples_per_class cannot be negative.")
+        validate_server_initialization_config(
+            checkpoint_path=getattr(self.config, "server_init_ckpt", None),
+            dataset=self.config.dataset,
+            public_split_mode=split_mode,
+            reinit_server=bool(getattr(self.config, "reinit_server", False)),
+        )
         # assert self.config.strategy in ['Pretrain','FED','FEDSB','FedAVG', 'FedDF'], 'The chosen strategy is not implemented'
 
         # Verify input to the strategy
@@ -343,6 +352,9 @@ class BaseRunner:
         sys.stdout.write(f"Private samples: {len(private_indices)}.\n")
         sys.stdout.write("Public/private/validation overlap: 0.\n")
         sys.stdout.write(f"Split manifest content SHA256: {manifest_digest}.\n")
+
+        self.public_split_manifest_digest = manifest_digest
+        self.public_split_public_samples = len(public_indices)
 
         public_datasets = {
             "client": public_client_dataset,

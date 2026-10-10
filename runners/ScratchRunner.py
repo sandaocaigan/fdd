@@ -17,6 +17,7 @@ from tqdm.auto import tqdm
 from actors import Actor
 from byzantine import attacks, defences
 from runners.BaseRunner import BaseRunner
+from server_pretraining import load_server_initial_checkpoint
 from utilities import Utilities as Utils
 
 
@@ -182,6 +183,40 @@ class ScratchRunner(BaseRunner):
             n_batches_per_epoch=n_batches_per_epoch,
             reinit_optimizer=(reinit_server or first_init),
         )
+
+    def maybe_load_server_initial_checkpoint(self):
+        """Load a validated public-data checkpoint when one is configured."""
+
+        checkpoint_path = getattr(self.config, "server_init_ckpt", None)
+        if checkpoint_path in [None, "none", "None"]:
+            sys.stdout.write("Server initialization: random weights (no checkpoint).\n")
+            return None
+
+        metadata = load_server_initial_checkpoint(
+            model=self.server.model,
+            checkpoint_path=checkpoint_path,
+            dataset=self.config.dataset,
+            arch=self.config.arch,
+            n_classes=self.n_classes,
+            manifest_digest=self.public_split_manifest_digest,
+            public_samples=self.public_split_public_samples,
+            map_location=self.device,
+        )
+        sys.stdout.write(
+            "Server initialization: loaded public-only checkpoint "
+            f"{metadata['checkpoint_path']}.\n"
+        )
+        sys.stdout.write(
+            "Server checkpoint validation: "
+            f"dataset={metadata['dataset']}, arch={metadata['arch']}, "
+            f"classes={metadata['n_classes']}, public_samples={metadata['public_samples']}, "
+            f"manifest_sha256={metadata['manifest_digest']}.\n"
+        )
+        if metadata.get("best_val_acc") is not None:
+            sys.stdout.write(
+                f"Server checkpoint best validation accuracy: {metadata['best_val_acc']:.6f}.\n"
+            )
+        return metadata
 
     @torch.no_grad()
     def compute_accuracy(self, loader, prediction):
@@ -667,6 +702,7 @@ class ScratchRunner(BaseRunner):
         # self.save_artifact_seed()
 
         self.assign_dataloaders()  # 加载数据集
+        self.maybe_load_server_initial_checkpoint()
         self.maybe_init_diffusion_purifier()
 
         self.set_client_optimizers()

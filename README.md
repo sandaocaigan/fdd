@@ -4,9 +4,18 @@
 
 主要流程是：客户端使用私有数据本地训练，在公共数据上生成 logits 并上传；恶意客户端可以修改上传结果；服务器使用 Probe 审计客户端行为，必要时过滤异常上传，最后聚合 logits 并进行服务器蒸馏。
 
-## 本版本更新（2026-10-09）
+## 本版本更新（2026-10-10）
 
-相对于上一版本 `6b1270a`，本版本主要完成了 ManipulatingKD P-L 与 SPC 过滤流程的兼容，并补充了可复现实验脚本和边界测试。
+在版本 `e92bc17` 已完成 ManipulatingKD P-L 与 SPC 兼容的基础上，本版本新增了可选的服务器预训练初始化，并保留原有随机初始化方式。
+
+- 新增 `--server_init_ckpt`：不传参数时保持随机初始化；传入检查点时加载预训练服务器权重。
+- 预训练工具只使用固定清单中的 5000 张带标签 CIFAR-10 公共样本，不接触剩余 42500 张客户端私有样本。
+- 固定的 2500 张验证样本用于选择最佳预训练轮次，CIFAR-10 测试集只在训练完成后评估一次。
+- 检查点保存数据集、模型结构、类别数、公共样本数和清单 SHA256；联邦训练启动时逐项验证并严格加载权重。
+- 禁止同时使用 `--server_init_ckpt` 和 `--reinit_server true`，避免通信轮重新初始化并丢弃预训练权重。
+- 新增服务器检查点和公共数据隔离测试；默认无检查点的旧实验命令不受影响。
+
+上一版本已完成以下 ManipulatingKD P-L 与 SPC 改动：
 
 - P-L 历史记录不再使用过滤后列表的位置推断客户端身份，而是使用稳定的 `client_id`。
 - SPC 过滤后，攻击历史会保存实际参与聚合的客户端数量、恶意上传和保留客户端 ID。
@@ -25,7 +34,7 @@
 | 清洁 + SPC | 否 | 是 | 32.47% | 31.86% |
 | P-L + SPC | 是 | 是 | 32.66% | 31.59% |
 
-当前结果说明 P-L 攻击已经产生明显效果，SPC 基本消除了攻击带来的额外准确率损失。但无攻击条件下 SPC 的诚实上传误报率仍较高，且固定 5000 张公共数据的清洁基线偏低。服务器预训练尚未加入本版本，后续实验需要先改进清洁基线，再重新验证攻击与防御。
+当前结果说明 P-L 攻击已经产生明显效果，SPC 基本消除了攻击带来的额外准确率损失。但无攻击条件下 SPC 的诚实上传误报率仍较高，且固定 5000 张公共数据的清洁基线偏低。表中结果全部来自随机初始化，不能与新增的预训练实验直接混合比较；加入预训练后应重新运行完整的清洁、攻击和防御对照组。
 
 ## 项目流程
 
@@ -172,6 +181,47 @@ python -u main.py \
 ```
 
 使用 `NoAttack` 时应将 `n_byzantine_clients` 设置为 `0`。
+
+## 可选服务器预训练
+
+该功能引入了一个明确的新实验假设：固定的 5000 张公共 CIFAR-10 图片具有真实标签，并允许服务器在联邦训练前使用这些标签进行监督预训练。论文或实验表格必须注明“带标签公共数据预训练”，不能把它与随机初始化结果视为同一设置。
+
+先在项目根目录训练服务器初始化检查点：
+
+```bash
+/home/user/lichengyuan/.conda_envs/feddistill310/bin/python \
+  tools/train_clean_teacher.py \
+  --dataset cifar10 \
+  --arch ResNet18 \
+  --output checkpoints/cifar10_resnet18_public5000_seed20260805.pt \
+  --public_split_manifest splits/cifar10_public_500x10_seed20260805.json \
+  --public_samples_per_class 500 \
+  --public_val_samples_per_class 250 \
+  --public_split_seed 20260805 \
+  --seed 20260805 \
+  --epochs 50 \
+  --batch_size 128 \
+  --lr 0.1 \
+  --device cuda:0 \
+  --use_amp
+```
+
+联邦训练时在原命令中加入：
+
+```bash
+--server_init_ckpt checkpoints/cifar10_resnet18_public5000_seed20260805.pt \
+--reinit_server false
+```
+
+启动日志应出现 `Server initialization: loaded public-only checkpoint` 和检查点元数据。第一轮本地训练前，`FedDistill.before_local_training()` 会把该服务器权重下发给全部客户端。
+
+不使用预训练时无需添加参数，或显式使用：
+
+```bash
+--server_init_ckpt none
+```
+
+此时日志显示 `Server initialization: random weights (no checkpoint)`，行为与旧版本一致。
 
 ## 攻击
 
