@@ -191,6 +191,11 @@ class Krum(LogitAggregationDefence):
             f"[{mode}] f={f} ({f_source}), nearest={neighbor_count}, "
             f"selected client ids={selected_ids}.\n"
         )
+        malicious_ids = {int(client.client_id) for client in self.clients if client.is_byzantine}
+        sys.stdout.write(
+            f"[Krum selection audit] malicious_selected="
+            f"{sum(client_id in malicious_ids for client_id in selected_ids)}/{selected_count}.\n"
+        )
         return aggregate, krum_scores
 
 
@@ -320,6 +325,12 @@ class AFA(LogitAggregationDefence):
         sys.stdout.write(
             f"[AFA] rejected this round={rejected_ids}; newly blocked={newly_blocked}; "
             f"blocked total={sorted(self.blocked_client_ids)}; retained={len(good_indices)}/{n_uploads}.\n"
+        )
+        malicious_ids = {int(client.client_id) for client in self.clients if client.is_byzantine}
+        sys.stdout.write(
+            f"[AFA retention audit] malicious_retained="
+            f"{sum(active_ids[index] in malicious_ids for index in good_indices)}/"
+            f"{sum(client_id in malicious_ids for client_id in active_ids)}.\n"
         )
         return aggregate, outlier_scores
 

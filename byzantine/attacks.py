@@ -397,15 +397,20 @@ class ManipulatingKD(NoAttack):
         formulation = str(self._cfg("manipkd_formulation", "paper")).lower()
         knowledge = str(self._cfg("manipkd_knowledge", "full_local")).lower().replace("-", "_")
         defence = str(self._cfg("defence", "NoDefence") or "NoDefence").lower()
+        estimator = str(self._cfg("manipkd_pl_estimator", "strict_mean")).lower()
+        if estimator not in ["strict_mean", "mean_surrogate"]:
+            raise ValueError("manipkd_pl_estimator must be strict_mean or mean_surrogate.")
+        if formulation not in ["paper", "original"] or knowledge not in [
+            "partial", "partial_local", "pl", "colluding_only"
+        ]:
+            return
         if (
-            formulation in ["paper", "original"]
-            and knowledge in ["partial", "partial_local", "pl", "colluding_only"]
-            and defence not in ["nodefence", "no_defence", "none", "mean", "average"]
+            defence not in ["nodefence", "no_defence", "none", "mean", "average"]
+            and not (estimator == "mean_surrogate" and defence in ["krum", "trimean", "afa"])
         ):
             raise ValueError(
-                "Paper P-L currently supports only NoDefence/mean aggregation. "
-                "Its benign-sum reconstruction is invalid for nonlinear defences "
-                "such as Krum, TriMean, or AFA."
+                "Paper P-L requires mean aggregation or manipkd_pl_estimator=mean_surrogate "
+                "with Krum, TriMean, or AFA."
             )
 
     def _constraint_enabled(self, name):
@@ -712,7 +717,7 @@ class ManipulatingKD(NoAttack):
 
     @torch.no_grad()
     def record_aggregated_logits(self, aggregated_logits, client_logits_list, client_ids=None):
-        """Store the retained cohort needed to reconstruct the P-L honest mean."""
+        """Store broadcasts and uploaded malicious logits for the P-L estimate."""
         if not any(client.is_byzantine for client in self.clients):
             return
         if client_ids is None:
@@ -763,6 +768,13 @@ class ManipulatingKD(NoAttack):
         })
         keep = max(int(self._cfg("manipkd_history_rounds", 5) or 5), 1)
         self._paper_history = self._paper_history[-keep:]
+        if str(self._cfg("manipkd_pl_estimator", "strict_mean")).lower() == "mean_surrogate":
+            uploaded_mean = torch.stack(client_logits_list).mean(dim=0)
+            proxy_gap = (aggregated_logits - uploaded_mean).pow(2).mean().sqrt().item()
+            print(
+                "[ManipulatingKD P-L proxy diagnostic] "
+                f"server_vs_mean_rmse={proxy_gap:.8f}."
+            )
         print(
             "[ManipulatingKD P-L history] "
             f"retained={retained_count}, honest={retained_honest_count}, "
@@ -770,24 +782,34 @@ class ManipulatingKD(NoAttack):
         )
 
     def _estimate_paper_benign_sum(self, current_honest_count):
-        """Scale the latest retained honest mean to the current honest cohort."""
+        """Estimate the current honest sum from recorded aggregate broadcasts."""
         if not self._paper_history:
             return None
-        latest_history = self._paper_history[-1]
-        retained_count = int(latest_history["retained_count"])
-        retained_honest_count = int(latest_history["retained_honest_count"])
-        if retained_honest_count <= 0:
+        estimator = str(self._cfg("manipkd_pl_estimator", "strict_mean")).lower()
+        history = self._paper_history if estimator == "mean_surrogate" else self._paper_history[-1:]
+        honest_means = []
+        for entry in history:
+            retained_count = int(entry["retained_count"])
+            retained_honest_count = int(entry["retained_honest_count"])
+            if retained_honest_count <= 0:
+                continue
+            aggregate = entry["aggregate"]
+            malicious_uploads = entry["malicious_uploads"]
+            malicious_sum = (
+                malicious_uploads.sum(dim=0)
+                if malicious_uploads.shape[0] > 0 else torch.zeros_like(aggregate)
+            )
+            # With nonlinear aggregation this is a Mean-surrogate estimate, not an inverse.
+            honest_means.append(
+                (aggregate * retained_count - malicious_sum) / float(retained_honest_count)
+            )
+        if not honest_means:
             return None
-
-        aggregate = latest_history["aggregate"]
-        malicious_uploads = latest_history["malicious_uploads"]
-        if malicious_uploads.shape[0] > 0:
-            retained_malicious_sum = malicious_uploads.sum(dim=0)
-        else:
-            retained_malicious_sum = torch.zeros_like(aggregate)
-        retained_honest_sum = aggregate * retained_count - retained_malicious_sum
-        retained_honest_mean = retained_honest_sum / float(retained_honest_count)
-        return retained_honest_mean * float(current_honest_count)
+        print(
+            f"[ManipulatingKD P-L estimate] estimator={estimator}, "
+            f"history_rounds_used={len(honest_means)}."
+        )
+        return torch.stack(honest_means).mean(dim=0) * float(current_honest_count)
 
     def _get_paper_perturbed_client_logits(self):
         """Implement the paper's F-L/P-L ManipulatingKD objectives (Eq. 16-23)."""

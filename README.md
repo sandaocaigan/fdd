@@ -6,6 +6,8 @@
 
 ## 本版本更新（2026-10-10）
 
+新增显式的 P-L Mean 代理模式，可用相同的 ManipulatingKD 上传分别测试 Krum、TriMean、AFA。攻击端用最近几轮广播结果构造 Mean 代理估计，服务器仍执行所选的真实防御；代理估计不等于对非线性聚合的精确反推。默认的 `strict_mean` 模式继续只支持均值聚合，已有实验命令的行为不变。
+
 在版本 `e92bc17` 已完成 ManipulatingKD P-L 与 SPC 兼容的基础上，本版本新增了可选的服务器预训练初始化，并保留原有随机初始化方式。
 
 - 新增 `--server_init_ckpt`：不传参数时保持随机初始化；传入检查点时加载预训练服务器权重。
@@ -21,7 +23,7 @@
 - SPC 过滤后，攻击历史会保存实际参与聚合的客户端数量、恶意上传和保留客户端 ID。
 - 修正 P-L 对上一轮诚实客户端输出的重建公式，聚合分母改为本轮实际保留的客户端数量。
 - 支持部分或全部恶意客户端被 SPC 删除，也能安全处理未保留诚实客户端的特殊情况。
-- 解除 `ManipulatingKD + SPC` 的旧兼容性限制；Krum、TriMean、AFA 等非线性聚合仍不使用该均值反推公式。
+- 解除 `ManipulatingKD + SPC` 的旧兼容性限制；Krum、TriMean、AFA 等非线性聚合须显式开启 Mean 代理估计。
 - 新增 `tests/test_manipulatingkd_history.py`，覆盖无过滤、客户端位置变化、部分恶意客户端删除、全部恶意客户端删除等场景。
 - 新增 `ssh/run_manipkd_spc_pair.sh` 和 `ssh/run_clear_spc_control.sh`，用于复现 P-L + SPC 及无攻击 + SPC 对照实验。
 
@@ -236,11 +238,24 @@ python -u main.py \
 - `LabelFlip`：恶意客户端在本地训练时翻转标签。
   
 - `ManipulatingKD`：优化恶意软标签，同时满足攻击目标和隐蔽性约束。
-  
+
 - `CPA`、`CELMAX`：原项目中的预测攻击。
-  
+
 - `BadNets`、`WaNet`、`LabelConsistent`：输入级后门攻击。
-  
+
+论文式 P-L 测试 Krum、TriMean 或 AFA 时，沿用同一组数据、检查点和攻击参数，在原有命令中设置：
+
+```bash
+--attack ManipulatingKD \
+--manipkd_formulation paper \
+--manipkd_knowledge partial_local \
+--manipkd_pl_estimator mean_surrogate \
+--manipkd_history_rounds 5 \
+--defence Krum
+```
+
+将最后一行换为 `--defence TriMean --trimean_trim_ratio 0.3` 或 `--defence AFA` 即可运行其他防御。论文在 30 个客户端、9 个恶意客户端的设置下，TriMean 每端去掉 9 个值，因此比例为 `0.3`。每种防御还需要同配置的 `NoAttack` 对照组；Krum 对照组应与攻击组使用相同的 `--krum_f 9`。默认 `strict_mean` 仍用于均值聚合的精确历史重建。日志中的 `[ManipulatingKD P-L proxy diagnostic]` 报告真实防御聚合与上传均值的差异；`[Krum selection audit]` 和 `[AFA retention audit]` 报告恶意上传的选中或保留情况。
+
 
 ## 防御
 

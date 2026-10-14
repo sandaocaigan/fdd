@@ -97,8 +97,9 @@ defaults = dict(
     manipkd_formulation="paper",
     manipkd_steps=30,
     manipkd_lagrange_lr=1.0,
-    # P-L currently uses the latest aggregate; this controls retained history only.
+    # Exact mean reconstruction uses the latest round; mean_surrogate averages history.
     manipkd_history_rounds=1,
+    manipkd_pl_estimator="strict_mean",
     manipkd_lr=0.05,
     manipkd_target="least_likely",
     manipkd_knowledge="full_local",
