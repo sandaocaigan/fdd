@@ -5,6 +5,7 @@
 # Description:  Byzantine Attack classes
 # ===========================================================================
 from collections import OrderedDict
+import math
 import sys
 
 import torch
@@ -335,6 +336,63 @@ class Shuffling(NoAttack):
             perturbed_logits[idx] = shuffled
         print("[Shuffling] Used per-client top-1 pseudo labels on the unlabeled public dataset.")
         return perturbed_logits
+
+
+class PCFDLA(NoAttack):
+    """Peak-controlled poisoning of each malicious client's runner-up class.
+
+    Applies the PCFDLA upload rule in the project's public-image FedDistill
+    protocol. Rankings come only from the uploading client's own logits.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        if self.config.strategy != "FedDistill":
+            raise ValueError("PCFDLA requires the FedDistill logit-upload strategy.")
+        self.peak = float(getattr(self.config, "pcfdla_peak", 5.0))
+        if not math.isfinite(self.peak) or self.peak <= 0:
+            raise ValueError("pcfdla_peak must be finite and strictly positive.")
+
+    @staticmethod
+    def poison_logits(logits, peak):
+        if logits.ndim != 2 or logits.shape[1] < 2:
+            raise ValueError("PCFDLA expects a [samples, classes] tensor with at least two classes.")
+        if not logits.is_floating_point():
+            raise ValueError("PCFDLA expects floating-point logits.")
+        if not math.isfinite(peak) or peak <= 0 or peak > torch.finfo(logits.dtype).max:
+            raise ValueError("pcfdla_peak must be positive, finite, and representable in the logit dtype.")
+        # Stable ties use ascending class index, independent of RNG and row order.
+        runner_up = logits.argsort(dim=1, descending=True, stable=True)[:, 1:2]
+        poisoned = torch.full_like(logits, -peak)
+        poisoned.scatter_(1, runner_up, peak)
+        return poisoned
+
+    @torch.no_grad()
+    def get_perturbed_client_logits(self, **kwargs):
+        uploads, _ = self.runner.get_client_logits_and_predictions(mode="train")
+        if len(uploads) != len(self.clients):
+            raise ValueError("PCFDLA requires one aligned logit upload per client.")
+        if not self.is_attack_active():
+            return uploads
+        result = list(uploads)
+        malicious_count = 0
+        changed = 0
+        sample_count = 0
+        for idx, client in enumerate(self.clients):
+            if not client.is_byzantine:
+                continue
+            clean = uploads[idx]
+            poisoned = self.poison_logits(clean, self.peak)
+            result[idx] = poisoned
+            malicious_count += 1
+            changed += int((clean.argmax(dim=1) != poisoned.argmax(dim=1)).sum().item())
+            sample_count += clean.shape[0]
+        print(
+            f"[PCFDLA] round={self.runner.current_round}, peak={self.peak:g}, "
+            f"malicious_clients={malicious_count}, poisoned_rows={sample_count}, "
+            f"upload_top1_change={changed / max(sample_count, 1):.6f}."
+        )
+        return result
 
 
 class LabelFlip(NoAttack):

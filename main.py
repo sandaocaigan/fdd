@@ -92,6 +92,8 @@ defaults = dict(
     hips=None,
     sample_attack_frac=None,
     logit_gaussian_scale=1.0,
+    # PCFDLA peak in raw-logit units; experimental setting, not a paper constant.
+    pcfdla_peak=5.0,
 
     # ManipulatingKD attack settings. "paper" implements the F-L/P-L objectives.
     manipkd_formulation="paper",
@@ -219,7 +221,7 @@ def _coerce_cli_value(key, value, default):
         "afa_block_threshold",
         "exp_stepsize", "sample_attack_frac", "distill_temperature",
         "backdoor_poison_rate", "backdoor_upload_rate", "backdoor_trigger_value",
-        "logit_gaussian_scale",
+        "logit_gaussian_scale", "pcfdla_peak",
         "wanet_grid_strength",
         "probe_blend_alpha", "probe_w_entropy", "probe_w_confidence", "probe_w_spc",
         "probe_w_target_bias", "probe_w_consensus", "probe_w_label",
