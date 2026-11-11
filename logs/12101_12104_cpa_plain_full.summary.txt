@@ -1,0 +1,35 @@
+Started: 2026-11-07T11:53:17+08:00
+CPA plain; profile=full; rounds=70; clients=30; attack/probe start=15
+Four independent runs from initialization; no checkpoint reuse. Full warmup: rounds 1-14.
+FedDistill raw-logit aggregation; CIFAR-10/ResNet18; full STL-10 unlabeled public set.
+Knowledge=honest_predictions (omniscient); covariance=stl10-cov.pt; class order=CIFAR-10 classifier.
+CPA probability-to-logit epsilon=1e-12; attack fraction=1; HIPS=false.
+SPC: identical scale/replace probes in all runs; core median + 5*std high-tail filter.
+12101 clear_mean attack=NoAttack filter=false
+12102 clear_spc attack=NoAttack filter=true
+12103 cpa_plain_mean attack=CPA filter=false
+12104 cpa_plain_spc attack=CPA filter=true
+Smoke checks execution only. Every run has its own clean/attack setting; this is a logit-space adaptation.
+SGD momentum=.9 wd=.0001; batch=128; T=1; LR=(Linear, 0.1); local/KD epochs=1/1; seed=20260805.
+No pretraining, client public KD, purifier, or mixed precision.
+0bf1130aad709be35398b1746cb6005b290817d0fa87a8af350c6537cb3defc1  main.py
+fdceadcfdd51c8ca70bcae559ace89306a6971a8046302e08041064cf169787e  byzantine/attacks.py
+f659fcd6e25dec6049a8bebd1a48e43ddaa8396834f970f544a6b40c9d20ee3e  byzantine/cpa_info/stl10-cov.pt
+d3edfabbd714a91a244cde2e72d4374bb1a767d77fa55f3ed2d72a32d84a995b  ssh/run_cpa_spc_matrix.sh
+Starting 12101: clear_mean; log=logs/12101_clear_mean.log
+Run 12101 clear_mean exit=0
+Final accuracy summary: server_test_acc=0.7178999781608582, client_ensemble_test_acc=0.7170000076293945.
+Starting 12102: clear_spc; log=logs/12102_clear_spc.log
+Run 12102 clear_spc exit=0
+Final accuracy summary: server_test_acc=0.711400032043457, client_ensemble_test_acc=0.7157000303268433.
+[Probe Core-Sigma Filter] excluded client ids=[]; retained 30/30 client uploads.
+Starting 12103: cpa_plain_mean; log=logs/12103_cpa_plain_mean.log
+Run 12103 cpa_plain_mean exit=0
+Final accuracy summary: server_test_acc=0.044199999421834946, client_ensemble_test_acc=0.15279999375343323.
+[CPA] covariance=/home/user/lichengyuan/fdd-main/byzantine/cpa_info/stl10-cov.pt; classes=10; hips=False; sample_attack_frac=1.0; logit_epsilon=1e-12; knowledge=honest_predictions; logit_upload=adaptation.
+Starting 12104: cpa_plain_spc; log=logs/12104_cpa_plain_spc.log
+Run 12104 cpa_plain_spc exit=0
+Final accuracy summary: server_test_acc=0.5306000113487244, client_ensemble_test_acc=0.5375000238418579.
+[CPA] covariance=/home/user/lichengyuan/fdd-main/byzantine/cpa_info/stl10-cov.pt; classes=10; hips=False; sample_attack_frac=1.0; logit_epsilon=1e-12; knowledge=honest_predictions; logit_upload=adaptation.
+[Probe Core-Sigma Filter] excluded client ids=[1, 2, 14, 15, 16, 17, 19, 25, 26]; retained 21/30 client uploads.
+All four runs completed: 2026-11-08T15:54:43+08:00

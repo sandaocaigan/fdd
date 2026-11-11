@@ -1,0 +1,21 @@
+PCFDLA smoke started: 2026-10-26T16:46:11+08:00
+Project: /home/user/lichengyuan/fdd-main; Python: /home/user/lichengyuan/.conda_envs/feddistill310/bin/python; Run IDs: 11001-11002
+FedDistill; ResNet18; random initialization; no client public KD
+CIFAR-10 private=47500, validation=2500; STL-10 public=100000
+Rounds=2; clients=4; attack/probe start=1
+SGD momentum=0.9 weight_decay=0.0001; batch=128; T=1
+Server/client LR=(Linear, 0.1); private/server epochs per round=1/1
+Probe replace/scale, 20 groups x 4 variants, seed=0; SPC threshold=5
+Identical probe inputs and audit settings in filter-on and filter-off groups.
+Peak S=1/5/10 are this project's trial values, not verified paper constants.
+Smoke validates execution only; it does not measure convergence or defense efficacy.
+Starting run 11001: pcfdla_s5_no_filter; detailed progress: logs/11001_pcfdla_s5_no_filter.log
+Run 11001: attack=PCFDLA peak=5 filter=false exit=0
+Final accuracy summary: server_test_acc=0.2019999921321869, client_ensemble_test_acc=0.2832000255584717.
+[PCFDLA] round=2, peak=5, malicious_clients=1, poisoned_rows=100000, upload_top1_change=1.000000.
+Starting run 11002: pcfdla_s5_spc; detailed progress: logs/11002_pcfdla_s5_spc.log
+Run 11002: attack=PCFDLA peak=5 filter=true exit=0
+Final accuracy summary: server_test_acc=0.31709998846054077, client_ensemble_test_acc=0.3246999979019165.
+[PCFDLA] round=2, peak=5, malicious_clients=1, poisoned_rows=100000, upload_top1_change=1.000000.
+[Probe Core-Sigma Filter] excluded client ids=[1]; retained 3/4 client uploads.
+All PCFDLA experiments finished: 2026-10-26T16:53:10+08:00

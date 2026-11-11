@@ -1,0 +1,54 @@
+PCFDLA traditional-defence comparison started: 2026-10-28T22:21:13+08:00
+Run IDs: 11021-11026; start at: clear_trimean
+Project: /home/user/lichengyuan/fdd-main; Python: /home/user/lichengyuan/.conda_envs/feddistill310/bin/python
+FedDistill, ResNet18, random initialization, no checkpoint, no client public KD
+CIFAR-10 private=47500 validation=2500; full STL-10 public=100000
+30 clients; 9 malicious for PCFDLA, 0 for NoAttack; seed=20260805
+70 rounds; attack/probe start=15; raw-logit peak=10
+Batch=128; T=1; SGD momentum=0.9 weight_decay=0.0001
+Server/client LR=(Linear, 0.1); private/server epochs per round=1/1
+Identical probes: scale/replace, 20 groups, scales=1.0,1.2,1.5,2.0, seed=0
+SPC audit=true, filter=false for every new run; purifier=false, AMP=false
+TriMean: ratio=0.3; Multi-Krum: f=9 selected=3 fallback=error (clean AND attacked)
+AFA: xi=2 delta_xi=0.5 prior_alpha=3 prior_beta=3 block_threshold=0.95
+Historical table used TriMean ratio=0.2; this registered comparison uses 0.3.
+Existing same-protocol references: 11011 clean Mean, 11012 clean SPC, 11017 PCFDLA Mean, 11018 PCFDLA SPC.
+These are logit-space implementations of traditional model aggregation rules.
+75ab3af295210b198917e8c387f46995c517a647e06a7d8d6544b3310731fca7  main.py
+8515664e56fd3ea6b7270e5271a02cf66ea02ab0e9ea959e944843d7b1a90a00  byzantine/attacks.py
+c4b4d61d19450ff98237fe3323613b71e69117260aab49cf166e9e0288ade000  byzantine/defences.py
+457e1994173c6a3dca3ef5d05bbc21e3bd1946c3fe469609ff7e029ff55d5fe8  ssh/run_pcfdla_traditional_matrix.sh
+Starting run 11021: clear_trimean; progress: logs/11021_clear_trimean.log
+Run 11021: attack=NoAttack peak=10 defence=TriMean exit=0
+Final accuracy summary: server_test_acc=0.6815999746322632, client_ensemble_test_acc=0.687999963760376.
+[TriMean] Trimmed 9 lowest and 9 highest client logits per coordinate (n=30, ratio=0.3000).
+[TriMean] Trimmed 9 lowest and 9 highest client logits per coordinate (n=30, ratio=0.3000).
+Starting run 11022: pcfdla_s10_trimean; progress: logs/11022_pcfdla_s10_trimean.log
+Run 11022: attack=PCFDLA peak=10 defence=TriMean exit=0
+Final accuracy summary: server_test_acc=0.6337000131607056, client_ensemble_test_acc=0.6482000350952148.
+[PCFDLA] round=70, peak=10, malicious_clients=9, poisoned_rows=900000, upload_top1_change=1.000000.
+[TriMean] Trimmed 9 lowest and 9 highest client logits per coordinate (n=30, ratio=0.3000).
+[TriMean] Trimmed 9 lowest and 9 highest client logits per coordinate (n=30, ratio=0.3000).
+Starting run 11023: clear_multikrum; progress: logs/11023_clear_multikrum.log
+Run 11023: attack=NoAttack peak=10 defence=Krum exit=0
+Final accuracy summary: server_test_acc=0.6165000200271606, client_ensemble_test_acc=0.6232999563217163.
+[Multi-Krum] f=9 (explicit krum_f), nearest=19, selected client ids=[18, 6, 2].
+[Krum selection audit] malicious_selected=0/3.
+Starting run 11024: pcfdla_s10_multikrum; progress: logs/11024_pcfdla_s10_multikrum.log
+Run 11024: attack=PCFDLA peak=10 defence=Krum exit=0
+Final accuracy summary: server_test_acc=0.6065000295639038, client_ensemble_test_acc=0.6104999780654907.
+[PCFDLA] round=70, peak=10, malicious_clients=9, poisoned_rows=900000, upload_top1_change=1.000000.
+[Multi-Krum] f=9 (explicit krum_f), nearest=19, selected client ids=[9, 22, 6].
+[Krum selection audit] malicious_selected=0/3.
+Starting run 11025: clear_afa; progress: logs/11025_clear_afa.log
+Run 11025: attack=NoAttack peak=10 defence=AFA exit=0
+Final accuracy summary: server_test_acc=0.6886000037193298, client_ensemble_test_acc=0.6916999816894531.
+[AFA retention audit] malicious_retained=0/0.
+[AFA retention audit] malicious_retained=0/0.
+Starting run 11026: pcfdla_s10_afa; progress: logs/11026_pcfdla_s10_afa.log
+Run 11026: attack=PCFDLA peak=10 defence=AFA exit=0
+Final accuracy summary: server_test_acc=0.4416999816894531, client_ensemble_test_acc=0.45160001516342163.
+[PCFDLA] round=70, peak=10, malicious_clients=9, poisoned_rows=900000, upload_top1_change=1.000000.
+[AFA retention audit] malicious_retained=0/9.
+[AFA retention audit] malicious_retained=0/9.
+All PCFDLA traditional-defence experiments finished: 2026-10-30T12:45:20+08:00

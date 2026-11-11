@@ -5,6 +5,7 @@
 # Description:  Byzantine Attack classes
 # ===========================================================================
 from collections import OrderedDict
+import math
 import sys
 
 import torch
@@ -14,6 +15,7 @@ from tqdm import tqdm
 
 from public_config import public_datasetAssignmentDict
 from utilities import Utilities as Utils
+from byzantine.poisonedfl import PoisonedFLLogitController
 import os
 
 #### Attack Base Class
@@ -335,6 +337,118 @@ class Shuffling(NoAttack):
             perturbed_logits[idx] = shuffled
         print("[Shuffling] Used per-client top-1 pseudo labels on the unlabeled public dataset.")
         return perturbed_logits
+
+
+class PCFDLA(NoAttack):
+    """Peak-controlled poisoning of each malicious client's runner-up class.
+
+    Applies the PCFDLA upload rule in the project's public-image FedDistill
+    protocol. Rankings come only from the uploading client's own logits.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        if self.config.strategy != "FedDistill":
+            raise ValueError("PCFDLA requires the FedDistill logit-upload strategy.")
+        self.peak = float(getattr(self.config, "pcfdla_peak", 5.0))
+        if not math.isfinite(self.peak) or self.peak <= 0:
+            raise ValueError("pcfdla_peak must be finite and strictly positive.")
+
+    @staticmethod
+    def poison_logits(logits, peak):
+        if logits.ndim != 2 or logits.shape[1] < 2:
+            raise ValueError("PCFDLA expects a [samples, classes] tensor with at least two classes.")
+        if not logits.is_floating_point():
+            raise ValueError("PCFDLA expects floating-point logits.")
+        if not math.isfinite(peak) or peak <= 0 or peak > torch.finfo(logits.dtype).max:
+            raise ValueError("pcfdla_peak must be positive, finite, and representable in the logit dtype.")
+        # Stable ties use ascending class index, independent of RNG and row order.
+        runner_up = logits.argsort(dim=1, descending=True, stable=True)[:, 1:2]
+        poisoned = torch.full_like(logits, -peak)
+        poisoned.scatter_(1, runner_up, peak)
+        return poisoned
+
+    @torch.no_grad()
+    def get_perturbed_client_logits(self, **kwargs):
+        uploads, _ = self.runner.get_client_logits_and_predictions(mode="train")
+        if len(uploads) != len(self.clients):
+            raise ValueError("PCFDLA requires one aligned logit upload per client.")
+        if not self.is_attack_active():
+            return uploads
+        result = list(uploads)
+        malicious_count = 0
+        changed = 0
+        sample_count = 0
+        for idx, client in enumerate(self.clients):
+            if not client.is_byzantine:
+                continue
+            clean = uploads[idx]
+            poisoned = self.poison_logits(clean, self.peak)
+            result[idx] = poisoned
+            malicious_count += 1
+            changed += int((clean.argmax(dim=1) != poisoned.argmax(dim=1)).sum().item())
+            sample_count += clean.shape[0]
+        print(
+            f"[PCFDLA] round={self.runner.current_round}, peak={self.peak:g}, "
+            f"malicious_clients={malicious_count}, poisoned_rows={sample_count}, "
+            f"upload_top1_change={changed / max(sample_count, 1):.6f}."
+        )
+        return result
+
+
+class PoisonedFL(NoAttack):
+    """PoisonedFL-inspired coordinated logits, not the original model-update attack."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        if self.config.strategy != "FedDistill":
+            raise ValueError("PoisonedFL logits adaptation requires the FedDistill strategy.")
+        options = {
+            name: getattr(self.config, "poisonedfl_" + name, default)
+            for name, default in (
+                ("strength", 1.0), ("direction", "fixed"), ("adaptive", False),
+                ("min_strength", 0.01), ("max_strength", 10.0),
+                ("feedback_interval", 5), ("feedback_target", 0.55),
+                ("adjust_factor", 1.25),
+            )
+        }
+        self.controller = PoisonedFLLogitController(seed=self._attack_seed, **options)
+
+    @torch.no_grad()
+    def get_perturbed_client_logits(self, **kwargs):
+        malicious_indices = [i for i, client in enumerate(self.clients) if client.is_byzantine]
+        active = self.is_attack_active() and bool(malicious_indices)
+        reference = None
+        if active and self.controller.adaptive:
+            uploads, _, reference = self.runner.get_client_logits_and_predictions(
+                mode="train", include_server=True,
+            )
+        else:
+            uploads, _ = self.runner.get_client_logits_and_predictions(mode="train")
+        if len(uploads) != len(self.clients):
+            raise ValueError("PoisonedFL requires one aligned logit upload per client.")
+        if not active:
+            return uploads
+        poisoned, diagnostics = self.controller.poison(
+            [uploads[i] for i in malicious_indices], self.runner.current_round,
+            reference_logits=reference,
+        )
+        result = list(uploads)
+        for index, logits in zip(malicious_indices, poisoned):
+            result[index] = logits
+        def metric(value):
+            return "none" if value is None else f"{value:.6f}"
+        print(
+            f"[PoisonedFL inspired] round={self.runner.current_round}, "
+            f"direction={self.controller.direction_mode}, adaptive={self.controller.adaptive}, "
+            f"malicious_clients={len(malicious_indices)}, strength={diagnostics['strength']:.6f}, "
+            f"offset_rms={diagnostics['offset_rms']:.6f}, "
+            f"direction_cosine={metric(diagnostics['direction_cosine'])}, "
+            f"feedback_alignment={metric(diagnostics['feedback_alignment'])}, "
+            f"adjustment={diagnostics['adjustment']}, "
+            f"upload_top1_change={diagnostics['top1_change']:.6f}."
+        )
+        return result
 
 
 class LabelFlip(NoAttack):
@@ -1001,49 +1115,140 @@ class ManipulatingKD(NoAttack):
         raise NotImplementedError(
             f"Unknown ManipulatingKD formulation '{formulation}'. Use paper or legacy."
         )
-    """Byzantine clients put full emphasis (one hot) on least corrrelated class."""
-class CPA(PredictionNaiveSignFlip):
-    def __init__(self,**kwargs):
-        super().__init__(**kwargs)
-        if self.config['public_ds'] in [None, 'none', 'None']:
-            public_ds = public_datasetAssignmentDict[self.config['dataset']]
-        else:
-            public_ds = self.config['dataset']
-        cpa_tensor_path = os.path.join('byzantine', 'cpa_info', f"{public_ds}-cov.pt")
-        self.cpa_tensor = torch.load(cpa_tensor_path, map_location=self.config.device)
 
+
+class CPA(PredictionNaiveSignFlip):
+    """Covariance poisoning using honest predictions (an omniscient attacker).
+
+    The covariance rows/columns must follow the private classifier's class order,
+    even when the public images come from another dataset. Logit uploads are an
+    adaptation of the original probability-upload attack, not an exact replay.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        if getattr(self.config, "strategy", "FedDistill") != "FedDistill":
+            raise ValueError("CPA requires the FedDistill prediction/logit-upload strategy.")
+        self.hips = getattr(self.config, "hips", False) is True
+        fraction = getattr(self.config, "sample_attack_frac", None)
+        self.sample_attack_frac = 1.0 if fraction in [None, "None", "none"] else float(fraction)
+        if not math.isfinite(self.sample_attack_frac) or not 0 <= self.sample_attack_frac <= 1:
+            raise ValueError("CPA sample_attack_frac must be in [0, 1].")
+        if self.hips and self.sample_attack_frac != 1.0:
+            raise ValueError("CPA HIPS requires sample_attack_frac=1 (or none).")
+        self.logit_epsilon = float(getattr(self.config, "cpa_logit_epsilon", 1e-12))
+        if not math.isfinite(self.logit_epsilon) or not 0 < self.logit_epsilon < 1:
+            raise ValueError("cpa_logit_epsilon must be finite and in (0, 1).")
+
+        dataset = self.config.dataset
+        split_mode = str(getattr(self.config, "public_split_mode", "legacy") or "legacy").lower()
+        in_domain = (
+            (dataset == "cifar10" and split_mode == "fixed_stratified")
+            or getattr(self.config, "public_ds_fraction", None) not in [None, "None", "none"]
+        )
+        public_ds = getattr(self.config, "public_ds", None)
+        if in_domain:
+            covariance_dataset = dataset
+        elif public_ds in [None, "none", "None"]:
+            covariance_dataset = public_datasetAssignmentDict[dataset]
+        else:
+            covariance_dataset = public_ds
+        override = getattr(self.config, "cpa_cov_path", None)
+        if override in [None, "none", "None"]:
+            cpa_tensor_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "cpa_info", f"{covariance_dataset}-cov.pt"
+            )
+        else:
+            cpa_tensor_path = os.path.abspath(os.path.expanduser(str(override)))
+        if not os.path.isfile(cpa_tensor_path):
+            raise FileNotFoundError(
+                f"CPA covariance file not found: {cpa_tensor_path}. "
+                "Set cpa_cov_path to a covariance tensor built for this public data "
+                "using the private classifier's class order; do not substitute an unrelated matrix."
+            )
+        load_args = dict(map_location="cpu")
+        try:
+            self.cpa_tensor = torch.load(cpa_tensor_path, weights_only=True, **load_args)
+        except TypeError:  # PyTorch versions before weights_only was introduced.
+            self.cpa_tensor = torch.load(cpa_tensor_path, **load_args)
+        n_classes = int(self.runner.n_classes)
+        if (
+            not isinstance(self.cpa_tensor, torch.Tensor)
+            or self.cpa_tensor.shape != (n_classes, n_classes)
+            or not self.cpa_tensor.is_floating_point()
+            or not torch.isfinite(self.cpa_tensor).all()
+        ):
+            raise ValueError(f"CPA covariance must be a finite floating {n_classes}x{n_classes} tensor.")
+        if not torch.allclose(self.cpa_tensor, self.cpa_tensor.T, rtol=1e-5, atol=1e-7):
+            raise ValueError("CPA covariance must be symmetric.")
+        sys.stdout.write(
+            f"[CPA] covariance={cpa_tensor_path}; classes={n_classes}; hips={self.hips}; "
+            f"sample_attack_frac={self.sample_attack_frac}; logit_epsilon={self.logit_epsilon:g}; "
+            "knowledge=honest_predictions; logit_upload=adaptation.\n"
+        )
+
+    @torch.no_grad()
     def get_perturbed_client_predictions(self, **kwargs):
         client_prediction_list = self.runner.get_client_predictions(mode='train')
-        if not self.is_attack_active():
-            return client_prediction_list
-        honest_client_predictions = [client_pred for client_idx, client_pred in enumerate(client_prediction_list)
-                                     if not self.clients[client_idx].is_byzantine]
+        return self._poison_uploads(client_prediction_list, client_prediction_list, logit_upload=False)
+
+    @torch.no_grad()
+    def get_perturbed_client_logits(self, **kwargs):
+        # Infer once, and retain the exact uploaded logits for honest clients,
+        # warmup rounds, and samples outside the attack mask.
+        client_logits, client_predictions = self.runner.get_client_logits_and_predictions(mode="train")
+        return self._poison_uploads(client_logits, client_predictions, logit_upload=True)
+
+    def _poison_uploads(self, uploads, predictions, logit_upload):
+        if len(uploads) != len(self.clients) or len(predictions) != len(self.clients):
+            raise ValueError("CPA uploads/predictions must be aligned with clients.")
+        if not self.is_attack_active() or self.sample_attack_frac == 0:
+            return uploads
+        malicious = [idx for idx, client in enumerate(self.clients) if client.is_byzantine]
+        if not malicious:
+            return uploads
+        honest_client_predictions = [pred for idx, pred in enumerate(predictions) if idx not in malicious]
+        if not honest_client_predictions:
+            raise ValueError("CPA needs at least one honest client to estimate honest predictions.")
+        shape = predictions[0].shape
+        if len(shape) != 2 or shape[1] != self.cpa_tensor.shape[0]:
+            raise ValueError("CPA prediction class dimension does not match covariance.")
+        if any(value.shape != shape for value in [*uploads, *predictions]):
+            raise ValueError("CPA upload/prediction shapes must match.")
         honest_client_predictions = torch.stack(honest_client_predictions, dim=0)
         mean_honest_predictions = torch.mean(honest_client_predictions, dim=0)
         honest_max_pred = torch.argmax(mean_honest_predictions, dim=1)
+        covariance = self.cpa_tensor.to(device=mean_honest_predictions.device, dtype=mean_honest_predictions.dtype)
 
-        if self.config['hips'] == True:
-            # Get the covariance vector corresponding to the honest_max_pred
-            cpa_tensor = self.cpa_tensor[honest_max_pred, :]
-
-            selected_vertices = torch.mul(cpa_tensor, honest_client_predictions).sum(dim=2).argmin(dim=0)
-            byz_predictions = honest_client_predictions[selected_vertices, torch.arange(selected_vertices.size()[0]), :]
+        if self.hips:
+            covariance_rows = covariance[honest_max_pred, :]
+            selected_vertices = (covariance_rows * honest_client_predictions).sum(dim=2).argmin(dim=0)
+            sample_indices = torch.arange(shape[0], device=mean_honest_predictions.device)
+            byz_predictions = honest_client_predictions[selected_vertices, sample_indices, :]
         else:
-            cpa_tensor = self.cpa_tensor.argmin(dim=0)
-            byz_label = cpa_tensor[honest_max_pred]
-            byz_predictions = torch.nn.functional.one_hot(byz_label, num_classes=client_prediction_list[0].shape[1]).float()
+            byz_label = covariance.argmin(dim=1)[honest_max_pred]
+            byz_predictions = F.one_hot(byz_label, num_classes=shape[1]).to(mean_honest_predictions.dtype)
 
-        if self.config['sample_attack_frac'] not in [None, 'None', 'none']:
-            assert not self.config['hips'], "Cannot sample attack fraction when hips is True."
-            p_honest = 1. - self.config['sample_attack_frac']
-            honest_idx = self._attack_randperm(byz_label.shape[0])[:int(byz_label.shape[0] * p_honest)]
-            byz_predictions[honest_idx,:] = mean_honest_predictions[honest_idx,:]
-
-        for client_idx, client_predictions in enumerate(client_prediction_list):
-            if self.clients[client_idx].is_byzantine:
-                # Get the least likely class and set full probability to that class
-                client_prediction_list[client_idx] = byz_predictions
-        return client_prediction_list
+        count = int(shape[0] * self.sample_attack_frac)
+        if count == 0:
+            return uploads
+        selected = slice(None) if count == shape[0] else self._attack_randperm(
+            shape[0], device=mean_honest_predictions.device
+        )[:count]
+        if logit_upload and self.hips:
+            # Keep HIPS inside the honest vertices of the actual upload space.
+            # log(softmax(z)) instead would shift honest rows and change distances.
+            honest_logits = torch.stack([value for idx, value in enumerate(uploads) if idx not in malicious])
+            byz_upload = honest_logits[selected_vertices, sample_indices, :]
+        elif logit_upload:
+            byz_upload = self.probabilities_to_logits(byz_predictions, eps=self.logit_epsilon)
+        else:
+            byz_upload = byz_predictions
+        result = list(uploads)
+        for idx in malicious:
+            result[idx] = uploads[idx].clone()
+            result[idx][selected] = byz_upload[selected]
+        return result
 
 
 class CELMAX(PredictionNaiveSignFlip):

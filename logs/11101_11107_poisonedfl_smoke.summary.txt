@@ -1,0 +1,52 @@
+PoisonedFL smoke started: 2026-10-30T16:12:19+08:00
+Run IDs: 11101-11107; project=/home/user/lichengyuan/fdd-main; Python=/home/user/lichengyuan/.conda_envs/feddistill310/bin/python
+Output-space adaptation; not an exact reproduction of CVPR 2025 PoisonedFL.
+CIFAR-10 private=47500 validation=2500; STL-10 public=100000; seed=20260805
+FedDistill; random ResNet18; no checkpoint; no client public KD
+Rounds=2; clients=4; malicious=1 for attacks; attack/probe start=1
+SGD momentum=0.9 wd=0.0001; batch=128; T=1; server/client LR=(Linear, 0.1); epochs=1/1
+Strength=1.0; centered unit-RMS sample directions; fixed vs fresh; bounds=0.01..10
+Adaptive feedback: interval=1 target=0.55 factor=1.25; broadcast-server outputs only
+Probes: replace/scale, 20 groups, scales=1,1.2,1.5,2; seed=0; audit=true; threshold=5
+Smoke validates execution and diagnostics only, not convergence or attack efficacy.
+01079023c1e38fa19d5efc853fe2ac14ad6494a547fca45e96ba42e0cb64fbbd  main.py
+9ae13355b8d92355a941865446eda315862e62e09131552522f486d339e1d208  byzantine/attacks.py
+9fdb07c7534d22f82bc21907cf324aa8e2cb01d8fe60c2ff490628da4dfe9fb2  byzantine/poisonedfl.py
+c5b4f1223ff09a10003a404dcb40a535f9c5c0b2ba5f91f2c6804280eac60b03  runners/ScratchRunner.py
+27cf7a337900c6d4bb663850a40f453950743e9eb693ca8b79007c30599996cd  probes/probe_auditor.py
+c22b4476f0ddb31246a3cd0930d9f951271417dd1a0420f5bc27d202c3476f26  ssh/run_poisonedfl_matrix.sh
+Starting run 11101: clear_no_filter; progress: logs/11101_poisonedfl_clear_no_filter.log
+Run 11101: condition=clear_no_filter exit=0
+Final accuracy summary: server_test_acc=0.311599999666214, client_ensemble_test_acc=0.3287000060081482.
+Starting run 11102: clear_spc; progress: logs/11102_poisonedfl_clear_spc.log
+Run 11102: condition=clear_spc exit=0
+Final accuracy summary: server_test_acc=0.35579997301101685, client_ensemble_test_acc=0.36640000343322754.
+[Probe Core-Sigma Filter] excluded client ids=[3]; retained 3/4 client uploads.
+Starting run 11103: fixed_no_filter; progress: logs/11103_poisonedfl_fixed_no_filter.log
+Run 11103: condition=fixed_no_filter exit=0
+Final accuracy summary: server_test_acc=0.3346000015735626, client_ensemble_test_acc=0.3385999798774719.
+[PoisonedFL inspired] round=1, direction=fixed, adaptive=False, malicious_clients=1, strength=1.000000, offset_rms=1.000000, direction_cosine=none, feedback_alignment=none, adjustment=hold, upload_top1_change=0.490730.
+[PoisonedFL inspired] round=2, direction=fixed, adaptive=False, malicious_clients=1, strength=1.000000, offset_rms=1.000000, direction_cosine=1.000000, feedback_alignment=none, adjustment=hold, upload_top1_change=0.478040.
+Starting run 11104: fresh_no_filter; progress: logs/11104_poisonedfl_fresh_no_filter.log
+Run 11104: condition=fresh_no_filter exit=0
+Final accuracy summary: server_test_acc=0.32910001277923584, client_ensemble_test_acc=0.3327000141143799.
+[PoisonedFL inspired] round=1, direction=fresh, adaptive=False, malicious_clients=1, strength=1.000000, offset_rms=1.000000, direction_cosine=none, feedback_alignment=none, adjustment=hold, upload_top1_change=0.493250.
+[PoisonedFL inspired] round=2, direction=fresh, adaptive=False, malicious_clients=1, strength=1.000000, offset_rms=1.000000, direction_cosine=-0.000322, feedback_alignment=none, adjustment=hold, upload_top1_change=0.475260.
+Starting run 11105: adaptive_no_filter; progress: logs/11105_poisonedfl_adaptive_no_filter.log
+Run 11105: condition=adaptive_no_filter exit=0
+Final accuracy summary: server_test_acc=0.3343999981880188, client_ensemble_test_acc=0.3385999798774719.
+[PoisonedFL inspired] round=1, direction=fixed, adaptive=True, malicious_clients=1, strength=1.000000, offset_rms=1.000000, direction_cosine=none, feedback_alignment=none, adjustment=hold, upload_top1_change=0.490730.
+[PoisonedFL inspired] round=2, direction=fixed, adaptive=True, malicious_clients=1, strength=0.800000, offset_rms=0.800000, direction_cosine=1.000000, feedback_alignment=0.500226, adjustment=shrink, upload_top1_change=0.465510.
+Starting run 11106: fixed_spc; progress: logs/11106_poisonedfl_fixed_spc.log
+Run 11106: condition=fixed_spc exit=0
+Final accuracy summary: server_test_acc=0.31709998846054077, client_ensemble_test_acc=0.3246999979019165.
+[PoisonedFL inspired] round=1, direction=fixed, adaptive=False, malicious_clients=1, strength=1.000000, offset_rms=1.000000, direction_cosine=none, feedback_alignment=none, adjustment=hold, upload_top1_change=0.490730.
+[PoisonedFL inspired] round=2, direction=fixed, adaptive=False, malicious_clients=1, strength=1.000000, offset_rms=1.000000, direction_cosine=1.000000, feedback_alignment=none, adjustment=hold, upload_top1_change=0.478670.
+[Probe Core-Sigma Filter] excluded client ids=[1]; retained 3/4 client uploads.
+Starting run 11107: adaptive_spc; progress: logs/11107_poisonedfl_adaptive_spc.log
+Run 11107: condition=adaptive_spc exit=0
+Final accuracy summary: server_test_acc=0.31709998846054077, client_ensemble_test_acc=0.3246999979019165.
+[PoisonedFL inspired] round=1, direction=fixed, adaptive=True, malicious_clients=1, strength=1.000000, offset_rms=1.000000, direction_cosine=none, feedback_alignment=none, adjustment=hold, upload_top1_change=0.490730.
+[PoisonedFL inspired] round=2, direction=fixed, adaptive=True, malicious_clients=1, strength=0.800000, offset_rms=0.800000, direction_cosine=1.000000, feedback_alignment=0.500006, adjustment=shrink, upload_top1_change=0.466600.
+[Probe Core-Sigma Filter] excluded client ids=[1]; retained 3/4 client uploads.
+All PoisonedFL experiments finished: 2026-10-30T16:36:28+08:00

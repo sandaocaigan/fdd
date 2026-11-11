@@ -1,0 +1,58 @@
+Started: 2026-11-08T17:01:42+08:00
+CPA plain traditional defenses; profile=smoke; rounds=2; clients=6; attack/probe start=1
+Six independent runs from initialization; no checkpoint reuse. Defenses operate from round 1; CPA starts at 1.
+FedDistill raw-logit aggregation; CIFAR-10/ResNet18; full STL-10 unlabeled public set.
+Knowledge=honest_predictions (omniscient); covariance=stl10-cov.pt; class order=CIFAR-10 classifier.
+CPA probability-to-logit epsilon=1e-12; attack fraction=1; HIPS=false.
+SPC audit=true, filter=false in all runs; same scale/replace probes as 12101-12104.
+TriMean ratio=.3; Multi-Krum f=1, selected=3, fallback=error in BOTH clean and attack groups.
+AFA xi=2, delta_xi=.5, prior_alpha=prior_beta=3, block_threshold=.95; fresh history for each run.
+Full reference: 12101 clean Mean=.7179, 12102 clean SPC=.7114, 12103 CPA Mean=.0442, 12104 CPA SPC=.5306.
+12291 clear_trimean attack=NoAttack defense=TriMean SPC_filter=false
+12292 cpa_plain_trimean attack=CPA defense=TriMean SPC_filter=false
+12293 clear_multikrum attack=NoAttack defense=Krum SPC_filter=false
+12294 cpa_plain_multikrum attack=CPA defense=Krum SPC_filter=false
+12295 clear_afa attack=NoAttack defense=AFA SPC_filter=false
+12296 cpa_plain_afa attack=CPA defense=AFA SPC_filter=false
+Smoke checks execution only. Every run has its own clean/attack setting; this is a logit-space adaptation.
+SGD momentum=.9 wd=.0001; batch=128; T=1; LR=(Linear, 0.1); local/KD epochs=1/1; seed=20260805.
+No pretraining, client public KD, purifier, or mixed precision.
+0bf1130aad709be35398b1746cb6005b290817d0fa87a8af350c6537cb3defc1  main.py
+fdceadcfdd51c8ca70bcae559ace89306a6971a8046302e08041064cf169787e  byzantine/attacks.py
+c4b4d61d19450ff98237fe3323613b71e69117260aab49cf166e9e0288ade000  byzantine/defences.py
+f659fcd6e25dec6049a8bebd1a48e43ddaa8396834f970f544a6b40c9d20ee3e  byzantine/cpa_info/stl10-cov.pt
+2f1ea999b85f57f7385028a185c2b0aa6a2260d0efb0763b5ab59e246682127b  ssh/run_cpa_traditional_matrix.sh
+Starting 12291: clear_trimean; log=logs/12291_clear_trimean.log
+Run 12291 clear_trimean exit=0
+Final accuracy summary: server_test_acc=0.3026999831199646, client_ensemble_test_acc=0.31029999256134033.
+[TriMean] Trimmed 1 lowest and 1 highest client logits per coordinate (n=6, ratio=0.3000).
+[TriMean] Trimmed 1 lowest and 1 highest client logits per coordinate (n=6, ratio=0.3000).
+Starting 12292: cpa_plain_trimean; log=logs/12292_cpa_plain_trimean.log
+Run 12292 cpa_plain_trimean exit=0
+Final accuracy summary: server_test_acc=0.2735000252723694, client_ensemble_test_acc=0.2816000282764435.
+[CPA] covariance=/home/user/lichengyuan/fdd-main/byzantine/cpa_info/stl10-cov.pt; classes=10; hips=False; sample_attack_frac=1.0; logit_epsilon=1e-12; knowledge=honest_predictions; logit_upload=adaptation.
+[TriMean] Trimmed 1 lowest and 1 highest client logits per coordinate (n=6, ratio=0.3000).
+[TriMean] Trimmed 1 lowest and 1 highest client logits per coordinate (n=6, ratio=0.3000).
+Starting 12293: clear_multikrum; log=logs/12293_clear_multikrum.log
+Run 12293 clear_multikrum exit=0
+Final accuracy summary: server_test_acc=0.3051999807357788, client_ensemble_test_acc=0.317300021648407.
+[Multi-Krum] f=1 (explicit krum_f), nearest=3, selected client ids=[5, 3, 4].
+[Krum selection audit] malicious_selected=0/3.
+Starting 12294: cpa_plain_multikrum; log=logs/12294_cpa_plain_multikrum.log
+Run 12294 cpa_plain_multikrum exit=0
+Final accuracy summary: server_test_acc=0.3111000061035156, client_ensemble_test_acc=0.319599986076355.
+[CPA] covariance=/home/user/lichengyuan/fdd-main/byzantine/cpa_info/stl10-cov.pt; classes=10; hips=False; sample_attack_frac=1.0; logit_epsilon=1e-12; knowledge=honest_predictions; logit_upload=adaptation.
+[Multi-Krum] f=1 (explicit krum_f), nearest=3, selected client ids=[6, 1, 5].
+[Krum selection audit] malicious_selected=0/3.
+Starting 12295: clear_afa; log=logs/12295_clear_afa.log
+Run 12295 clear_afa exit=0
+Final accuracy summary: server_test_acc=0.274399995803833, client_ensemble_test_acc=0.2802000045776367.
+[AFA retention audit] malicious_retained=0/0.
+[AFA retention audit] malicious_retained=0/0.
+Starting 12296: cpa_plain_afa; log=logs/12296_cpa_plain_afa.log
+Run 12296 cpa_plain_afa exit=0
+Final accuracy summary: server_test_acc=0.2533000111579895, client_ensemble_test_acc=0.2655999958515167.
+[CPA] covariance=/home/user/lichengyuan/fdd-main/byzantine/cpa_info/stl10-cov.pt; classes=10; hips=False; sample_attack_frac=1.0; logit_epsilon=1e-12; knowledge=honest_predictions; logit_upload=adaptation.
+[AFA retention audit] malicious_retained=0/1.
+[AFA retention audit] malicious_retained=0/1.
+All six runs completed: 2026-11-08T17:32:45+08:00

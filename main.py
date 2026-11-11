@@ -91,7 +91,32 @@ defaults = dict(
     exp_stepsize=None,
     hips=None,
     sample_attack_frac=None,
+    # CPA logit-upload adaptation; covariance axes must match classifier classes.
+    cpa_cov_path=None,
+    cpa_logit_epsilon=1e-12,
     logit_gaussian_scale=1.0,
+    # PCFDLA peak in raw-logit units; experimental setting, not a paper constant.
+    pcfdla_peak=5.0,
+
+    # Output-space adaptation, not the original parameter-upload PoisonedFL.
+    poisonedfl_strength=1.0,
+    poisonedfl_direction="fixed",
+    poisonedfl_adaptive=False,
+    poisonedfl_min_strength=0.01,
+    poisonedfl_max_strength=10.0,
+    poisonedfl_feedback_interval=5,
+    poisonedfl_feedback_target=0.55,
+    poisonedfl_adjust_factor=1.25,
+    # Optional paired diagnostic runner; ordinary experiments keep ScratchRunner.
+    poisonedfl_pair_rounds=0,
+    poisonedfl_pair_samples=2048,
+    poisonedfl_pair_checkpoint=None,
+    # When enabled, run eight paired branches: four strengths with SPC off/on.
+    poisonedfl_pair_spc=False,
+    # Two SPC-only branches: clean and fixed strength 10.
+    poisonedfl_pair_spc_only=False,
+    # Six branches: clean/strength10 for TriMean, Multi-Krum and AFA.
+    poisonedfl_pair_traditional=False,
 
     # ManipulatingKD attack settings. "paper" implements the F-L/P-L objectives.
     manipkd_formulation="paper",
@@ -211,15 +236,19 @@ def _coerce_cli_value(key, value, default):
         "manipkd_trim_count", "manipkd_geomedian_iters", "krum_f", "krum_residual_f",
         "krum_num_selected", "public_samples_per_class", "public_val_samples_per_class",
         "public_split_seed",
+        "poisonedfl_feedback_interval",
+        "poisonedfl_pair_rounds", "poisonedfl_pair_samples",
     }
     float_keys = {
         "momentum", "weight_decay", "public_ds_fraction",
         "filter_threshold", "filter_quantile", "expweights",
         "trimean_trim_ratio", "afa_xi", "afa_delta_xi", "afa_prior_alpha", "afa_prior_beta",
         "afa_block_threshold",
-        "exp_stepsize", "sample_attack_frac", "distill_temperature",
+        "exp_stepsize", "sample_attack_frac", "distill_temperature", "cpa_logit_epsilon",
         "backdoor_poison_rate", "backdoor_upload_rate", "backdoor_trigger_value",
-        "logit_gaussian_scale",
+        "logit_gaussian_scale", "pcfdla_peak",
+        "poisonedfl_strength", "poisonedfl_min_strength", "poisonedfl_max_strength",
+        "poisonedfl_feedback_target", "poisonedfl_adjust_factor",
         "wanet_grid_strength",
         "probe_blend_alpha", "probe_w_entropy", "probe_w_confidence", "probe_w_spc",
         "probe_w_target_bias", "probe_w_consensus", "probe_w_label",
@@ -238,6 +267,10 @@ def _coerce_cli_value(key, value, default):
         "hips", "evaluate_backdoor_asr", "use_probe", "probe_log_each_round", "use_diffusion_purifier",
         "diffusion_entropy_calibration", "manipkd_project", "probe_core_sigma_audit",
         "probe_core_sigma_filter",
+        "poisonedfl_adaptive",
+        "poisonedfl_pair_spc",
+        "poisonedfl_pair_spc_only",
+        "poisonedfl_pair_traditional",
     }
 
     if key in int_keys:
@@ -299,7 +332,11 @@ def tempdir():
 
 with tempdir() as tmp_dir:
     sys.stdout.write(f"Using config: {config}.\n")
-    runner = ScratchRunner(config=config, tmp_dir=tmp_dir, debug=debug)
+    runner_class = ScratchRunner
+    if config.poisonedfl_pair_rounds:
+        from runners.PoisonedFLPairRunner import PoisonedFLPairRunner
+        runner_class = PoisonedFLPairRunner
+    runner = runner_class(config=config, tmp_dir=tmp_dir, debug=debug)
 
     runner.run()
 

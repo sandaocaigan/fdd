@@ -1,0 +1,7 @@
+Shared clean checkpoint: checkpoints/poisonedfl_pair_11111_round14.pt
+Signature: f859da32aeb0bed9a002d02384e297702da5b05fa141db28f02562819fd1e25a
+Warmup accuracy: {"round": 14, "server_test_acc": 0.3028999865055084, "server_test_loss": 1.8235304355621338, "ensemble_test_acc": 0.30740001797676086}
+Warmup=14; branch_rounds=56; LR horizon=70; fixed directions; Mean; SPC matrix=False; SPC only=True
+Run 11502: condition=clear_spc, exit=0, server_test_acc=0.711400, ensemble_test_acc=0.715700, delta_vs_clear_pp=0.0000
+Run 11503: condition=strength10_spc, exit=0, server_test_acc=0.720600, ensemble_test_acc=0.723000, delta_vs_clear_pp=0.9200
+All PoisonedFL paired branches finished.

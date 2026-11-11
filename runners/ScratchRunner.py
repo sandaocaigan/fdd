@@ -230,8 +230,12 @@ class ScratchRunner(BaseRunner):
         return accuracy_meter.compute()
 
     @torch.no_grad()
-    def get_client_logits_and_predictions(self, mode: str):
-        """Collect client logits and softmax probabilities on the public train/test set."""
+    def get_client_logits_and_predictions(self, mode: str, include_server: bool = False):
+        """Collect by dataset index; optionally return broadcast-server logits too.
+
+        Feedback shares the same public images and loader iteration as uploads,
+        avoiding an extra shuffled pass or consumption of training RNG state.
+        """
         assert mode in ["train", "test"]
         loader = self.dataloaders_public[mode]
         sys.stdout.write("\nCollecting logits and predictions of all clients.\n")
@@ -245,16 +249,29 @@ class ScratchRunner(BaseRunner):
             for _ in range(len(self.clients))
         ]
 
-        with tqdm(loader, leave=True) as pbar:
-            for x_input, _, indices in pbar:
-                x_input = x_input.to(self.device, non_blocking=True)
-                with autocast(enabled=(self.use_amp is True)):
-                    for client_idx, client in enumerate(self.clients):
-                        output = client.model.eval()(x_input).float()
-                        probabilities = torch.nn.functional.softmax(output, dim=1)
-                        logits_store_tensors[client_idx][indices] = output.detach()
-                        prediction_store_tensors[client_idx][indices] = probabilities.detach()
-
+        server_logits = None
+        server_modes = []
+        if include_server:
+            server_logits = torch.zeros(len(loader.dataset), self.n_classes, device=self.device)
+            server_modes = [(module, module.training) for module in self.server.model.modules()]
+            self.server.model.eval()
+        try:
+            with tqdm(loader, leave=True) as pbar:
+                for x_input, _, indices in pbar:
+                    x_input = x_input.to(self.device, non_blocking=True)
+                    with autocast(enabled=(self.use_amp is True)):
+                        for client_idx, client in enumerate(self.clients):
+                            output = client.model.eval()(x_input).float()
+                            probabilities = torch.nn.functional.softmax(output, dim=1)
+                            logits_store_tensors[client_idx][indices] = output.detach()
+                            prediction_store_tensors[client_idx][indices] = probabilities.detach()
+                        if include_server:
+                            server_logits[indices] = self.server.model(x_input).float().detach()
+        finally:
+            for module, training in server_modes:
+                module.training = training
+        if include_server:
+            return logits_store_tensors, prediction_store_tensors, server_logits
         return logits_store_tensors, prediction_store_tensors
 
     @torch.no_grad()
